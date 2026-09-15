@@ -1,0 +1,12 @@
+Add the farmers market video here.
+
+1. In your Wix dashboard, open Media Manager and find the video "IMG_0672.mov"
+   (the Melrose Place Farmers Market video).
+2. Download it and convert it to MP4 if needed (QuickTime > File > Export As > 1080p,
+   or any free converter).
+3. Save it in this folder with exactly this name:
+
+   melrose-place-farmers-market.mp4
+
+The home page and the Farmers Market page will play it automatically.
+Until the file is here, those pages show the video's cover image with a short note.

@@ -1,0 +1,55 @@
+{
+  "cleanUrls": true,
+  "redirects": [
+    {
+      "source": "/home",
+      "destination": "/",
+      "permanent": true
+    },
+    {
+      "source": "/general-5",
+      "destination": "/accessibility",
+      "permanent": true
+    },
+    {
+      "source": "/menu",
+      "destination": "/order",
+      "permanent": true
+    },
+    {
+      "source": "/order-online",
+      "destination": "/order",
+      "permanent": true
+    },
+    {
+      "source": "/cart-page",
+      "destination": "/order#cart",
+      "permanent": true
+    },
+    {
+      "source": "/policy",
+      "destination": "/policies",
+      "permanent": true
+    },
+    {
+      "source": "/quote-request",
+      "destination": "/catering#quote",
+      "permanent": true
+    },
+    {
+      "source": "/new-catering",
+      "destination": "/catering",
+      "permanent": true
+    },
+    {
+      "source": "/oldwholesale",
+      "destination": "/wholesale",
+      "permanent": true
+    },
+    {
+      "source": "/canoga-park",
+      "destination": "/contact",
+      "permanent": true
+    }
+  ]
+}

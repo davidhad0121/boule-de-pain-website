@@ -1,0 +1,11 @@
+# Old Wix addresses -> new pages (used by Netlify and Cloudflare Pages)
+/home  /  301
+/general-5  /accessibility.html  301
+/menu  /order.html  301
+/order-online  /order.html  301
+/cart-page  /order.html#cart  301
+/policy  /policies.html  301
+/quote-request  /catering.html#quote  301
+/new-catering  /catering.html  301
+/oldwholesale  /wholesale.html  301
+/canoga-park  /contact.html  301

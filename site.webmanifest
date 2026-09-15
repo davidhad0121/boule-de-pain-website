@@ -1,0 +1,20 @@
+{
+  "name": "Boule de Pain",
+  "short_name": "Boule de Pain",
+  "start_url": "./index.html",
+  "display": "minimal-ui",
+  "background_color": "#FFFFFF",
+  "theme_color": "#FF97D3",
+  "icons": [
+    {
+      "src": "https://static.wixstatic.com/media/37ffc0_f74025ac4b024bfe8b029d1934f61fe7~mv2.png/v1/fill/w_192,h_192,al_c,q_85,usm_0.66_1.00_0.01,enc_auto/37ffc0_f74025ac4b024bfe8b029d1934f61fe7_mv2.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "https://static.wixstatic.com/media/37ffc0_f74025ac4b024bfe8b029d1934f61fe7~mv2.png/v1/fill/w_512,h_512,al_c,q_85,usm_0.66_1.00_0.01,enc_auto/37ffc0_f74025ac4b024bfe8b029d1934f61fe7_mv2.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

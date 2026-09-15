@@ -443,7 +443,7 @@ window.MENU = {
             {
               "slug": "spicy-chipotle-chicken",
               "name": "Spicy Chipotle Chicken",
-              "desc": "Eggs, roasted peppers spread, mozzarella cheese, lettuce, tomato, avocado. Comes with a choice of potato or cucumber salad and potato chips.",
+              "desc": "Spicy chipotle chicken sandwich. Comes with a choice of potato or cucumber salad and potato chips.",
               "price": 16.95,
               "addons": [
                 "g9"

@@ -418,6 +418,11 @@
       });
     }
 
+    function notePlaceholder(it) {
+      if (it.cat === 'cakes' || it.cat === 'gluten-free') return 'Writing on the cake, allergies, other requests…';
+      if (it.cat === 'lunch') return 'Allergies, leave something out, other requests…';
+      return 'Allergies or other requests…';
+    }
     function renderItem(it) {
       var preset = (pending && pending.preset) || {};
       var size = preset.size || (it.sizes ? it.sizes[0].name : '');
@@ -442,7 +447,7 @@
             }).join('') + '</fieldset>' : '') +
           '<div data-addon-groups></div>' +
           '<div class="field"><label for="i-note">Special requests</label>' +
-            '<textarea class="textarea" id="i-note" name="note" rows="2" maxlength="200" placeholder="Writing on the cake, allergies, other requests…">' + esc(preset.note || '') + '</textarea>' +
+            '<textarea class="textarea" id="i-note" name="note" rows="2" maxlength="200" placeholder="' + notePlaceholder(it) + '">' + esc(preset.note || '') + '</textarea>' +
             '<p class="field__hint">Requests that change the price will be confirmed by the bakery.</p></div>' +
         '</div>';
       renderGroups(it, size, preset.addons || []);

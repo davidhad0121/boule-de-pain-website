@@ -119,6 +119,9 @@ window.SITE = {
   "chatbot": {
     "workerUrl": "https://bouledepain-chatbot.bouledepain.workers.dev"
   },
+  "admin": {
+    "url": "https://bouledepain-admin.bouledepain.workers.dev"
+  },
   "announcement": "Order before 3 PM for next-day delivery · No deliveries on Saturday & Sunday",
   "markets": [
     {

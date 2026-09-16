@@ -18,7 +18,9 @@
   }
   var moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
   function money(n) { return moneyFmt.format(n || 0); }
-  var reduceMotion = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var systemReduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // "Stop animations" in the accessibility options counts too
+  function motionOff() { return systemReduce || doc.documentElement.classList.contains('a11y-still'); }
 
   /* ---------- Safe storage (private mode / blocked storage never breaks the page) ---------- */
   var store = {
@@ -66,19 +68,25 @@
     return h && h.open && h.close ? { open: toMin(h.open), close: toMin(h.close) } : null;
   }
 
+  function closureNote(d) {
+    var notes = SITE.closureNotes || {};
+    return notes[isoDate(d)] || '';
+  }
   function storeStatus() {
     var n = nowLocal();
     var today = hoursFor(n.date);
+    var note = today ? '' : closureNote(n.date);
     if (today && n.minutes >= today.open && n.minutes < today.close) {
       var left = today.close - n.minutes;
       return { open: true, text: left <= 60 ? 'Open · closes soon (' + fmtTime(today.close) + ')' : 'Open now · until ' + fmtTime(today.close) };
     }
     if (today && n.minutes < today.open) return { open: false, text: 'Closed · opens today at ' + fmtTime(today.open) };
+    var label = note ? 'Closed today (' + note + ')' : 'Closed';
     for (var i = 1; i <= 14; i++) {
       var d = addDays(n.date, i), h = hoursFor(d);
-      if (h) return { open: false, text: 'Closed · opens ' + (i === 1 ? 'tomorrow' : DAY_NAMES[d.getUTCDay()]) + ' at ' + fmtTime(h.open) };
+      if (h) return { open: false, text: label + ' · opens ' + (i === 1 ? 'tomorrow' : DAY_NAMES[d.getUTCDay()]) + ' at ' + fmtTime(h.open) };
     }
-    return { open: false, text: 'Closed' };
+    return { open: false, text: label };
   }
 
   /* Hours lists: grouped ("compact") or one row per day ("full"), rendered from site-config.js */
@@ -121,6 +129,201 @@
       el.hidden = false;
       el.classList.toggle('is-open', s.open);
       el.classList.toggle('is-closed', !s.open);
+    });
+  }
+
+  /* ---------- Text that follows the ordering rules (cutoff, delivery days) ---------- */
+  var WEEK = [1, 2, 3, 4, 5, 6, 0];
+  function dayList(days, style, join) {
+    var ds = WEEK.filter(function (d) { return days.indexOf(d) > -1; });
+    if (!ds.length) return '';
+    var names = ds.map(function (d) { return DAY_NAMES[d]; });
+    var idx = ds.map(function (d) { return WEEK.indexOf(d); });
+    var contiguous = idx.every(function (v, i) { return v === idx[0] + i; });
+    if (ds.length >= 3 && contiguous && style !== 'list') {
+      return names[0] + ({ dash: '–', to: ' to ' }[style] || ' through ') + names[names.length - 1];
+    }
+    if (names.length === 1) return names[0];
+    return names.slice(0, -1).join(', ') + ' ' + (join || 'and') + ' ' + names[names.length - 1];
+  }
+  function deliveryDays() { return ((SITE.ordering || {}).deliveryDays || [1, 2, 3, 4, 5]).slice(); }
+  function renderRules() {
+    var on = deliveryDays();
+    var off = [0, 1, 2, 3, 4, 5, 6].filter(function (d) { return on.indexOf(d) < 0; });
+    var cutoff = fmtTime(toMin((SITE.ordering || {}).cutoff || '15:00'));
+    $$('[data-cutoff-time]').forEach(function (el) { el.textContent = cutoff; });
+    $$('[data-days]').forEach(function (el) {
+      var list = el.getAttribute('data-days') === 'off' ? off : on;
+      el.textContent = dayList(list, el.getAttribute('data-style'), el.getAttribute('data-join'));
+    });
+    $$('[data-if-days]').forEach(function (el) {
+      el.hidden = !(el.getAttribute('data-if-days') === 'off' ? off : on).length;
+    });
+  }
+  function hoursText(sep) {
+    return groupedHours().map(function (g) { return g.label + (sep === 'inline' ? ' ' : ': ') + g.time; });
+  }
+  function renderHeaderHours() {
+    $$('[data-hours-text]').forEach(function (el) {
+      var parts = hoursText();
+      el.textContent = '';
+      parts.forEach(function (t, i) {
+        el.appendChild(doc.createTextNode(t));
+        if (i === parts.length - 1) return;
+        if (i === 1) el.appendChild(doc.createElement('br'));
+        else el.appendChild(doc.createTextNode(' \u00a0·\u00a0 '));
+      });
+    });
+    $$('[data-hours-inline]').forEach(function (el) { el.textContent = hoursText('inline').join('; '); });
+  }
+  function renderAnnouncement() {
+    var text = String(SITE.announcement || '').trim();
+    $$('[data-announce]').forEach(function (bar) {
+      bar.hidden = !text;
+      var t = $('[data-announce-text]', bar);
+      if (t && text) t.textContent = text;
+    });
+  }
+
+  /* ---------- Photos: the bakery's Wix library, or photos uploaded in the admin panel ---------- */
+  var WIX = 'https://static.wixstatic.com/media/';
+  function imgUrl(ref, w, h) {
+    if (!ref) return '';
+    if (String(ref).indexOf('upload:') === 0) {
+      return window.BDP_LIVE && BDP_LIVE.imgUrl ? BDP_LIVE.imgUrl(ref, Math.max(w, h) <= 480 ? 'thumb' : 'full') : '';
+    }
+    return WIX + ref + '/v1/fill/w_' + w + ',h_' + h + ',al_c,q_80,usm_0.66_1.00_0.01,enc_auto/' + String(ref).replace(/~/g, '_');
+  }
+  function liveData() {
+    var live = window.BDP_LIVE;
+    return live && live.source !== 'files' && live.menu ? live : null;
+  }
+
+  /* Farmers markets as published in the admin panel */
+  function renderMarketsLive() {
+    if (!liveData() || !Array.isArray(SITE.markets)) return;
+    var markets = SITE.markets.slice().sort(function (a, b) { return WEEK.indexOf(a.day) - WEEK.indexOf(b.day); });
+    var count = markets.reduce(function (n, m) { return n + m.locations.length; }, 0);
+    $$('[data-market-count]').forEach(function (el) { el.textContent = String(count); });
+    $$('[data-market-days]').forEach(function (el) {
+      el.textContent = dayList(markets.map(function (m) { return m.day; }), 'list', 'and');
+    });
+    $$('.market-grid').forEach(function (grid) {
+      var photos = {};
+      $$('[data-market-day]', grid).forEach(function (card) {
+        var im = $('img', card);
+        if (im) photos[card.getAttribute('data-market-day')] = im;
+      });
+      var fallback = $('img', grid);
+      grid.textContent = '';
+      markets.forEach(function (m) {
+        var card = doc.createElement('article');
+        card.className = 'market-card reveal is-in';
+        card.setAttribute('data-market-day', String(m.day));
+        card.setAttribute('data-market-names', m.locations.join(', '));
+        var badge = doc.createElement('span');
+        badge.className = 'market-card__badge';
+        badge.setAttribute('aria-live', 'off');
+        card.appendChild(badge);
+        var photo = photos[String(m.day)] || fallback;
+        if (photo) card.appendChild(photo.cloneNode(true));
+        var h = doc.createElement('h3');
+        h.className = 'market-card__day';
+        h.textContent = DAY_NAMES[m.day];
+        card.appendChild(h);
+        var ul = doc.createElement('ul');
+        ul.className = 'market-list';
+        m.locations.forEach(function (name) {
+          var li = doc.createElement('li');
+          var a = doc.createElement('a');
+          a.href = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(name === 'Channel Islands' ? 'Channel Islands Harbor Farmers Market' : name + ' Farmers Market');
+          a.target = '_blank';
+          a.rel = 'noopener';
+          a.textContent = name;
+          a.insertAdjacentHTML('beforeend', icon('external') + '<span class="sr-only"> — open in Google Maps (new tab)</span>');
+          li.appendChild(a);
+          ul.appendChild(li);
+        });
+        card.appendChild(ul);
+        grid.appendChild(card);
+      });
+    });
+  }
+
+  /* Home page bestsellers follow the "Bestseller" switch in the admin panel */
+  function renderBestsellers() {
+    var live = liveData();
+    var grid = $('[data-bestsellers]');
+    if (!live || !grid) return;
+    var groups = live.menu.addonGroups || {};
+    var picks = [];
+    live.menu.categories.forEach(function (cat) {
+      (cat.groups || [{ items: cat.items || [] }]).forEach(function (g) {
+        g.items.forEach(function (it) { if (it.popular && !it.hidden) picks.push({ it: it, id: cat.id + '.' + it.slug }); });
+      });
+    });
+    var section = grid.closest('section');
+    if (section) section.hidden = !picks.length;
+    if (!picks.length) return;
+    var photos = {};
+    $$('[data-best-id]', grid).forEach(function (card) {
+      var im = $('.best-card__img', card);
+      if (im) photos[card.getAttribute('data-best-id')] = im;
+    });
+    grid.textContent = '';
+    picks.slice(0, 6).forEach(function (p) {
+      var it = p.it;
+      var card = doc.createElement('article');
+      card.className = 'best-card reveal is-in';
+      card.setAttribute('data-best-id', p.id);
+      var media;
+      var uploaded = it.img && String(it.img).indexOf('upload:') === 0;
+      if (photos[p.id] && !uploaded) {
+        media = photos[p.id];
+      } else if (it.img) {
+        media = doc.createElement('div');
+        media.className = 'best-card__img';
+        var im = doc.createElement('img');
+        im.src = imgUrl(it.img, 800, 800);
+        if (!uploaded) im.srcset = imgUrl(it.img, 400, 400) + ' 400w, ' + imgUrl(it.img, 800, 800) + ' 800w';
+        im.sizes = '(min-width: 1180px) 370px, (min-width: 720px) 30vw, 100vw';
+        im.width = 800;
+        im.height = 800;
+        im.alt = it.name;
+        im.loading = 'lazy';
+        im.decoding = 'async';
+        media.appendChild(im);
+      }
+      if (media) card.appendChild(media);
+      var h = doc.createElement('h3');
+      h.textContent = it.name;
+      card.appendChild(h);
+      var price = doc.createElement('p');
+      price.className = 'best-card__price';
+      price.textContent = (it.sizes && it.sizes.length ? 'From ' : '') + money(it.price);
+      card.appendChild(price);
+      var needsChoice = (it.sizes && it.sizes.length) || (it.addons || []).some(function (gid) { return groups[gid]; });
+      if (it.soldOut) {
+        var sold = doc.createElement('p');
+        sold.className = 'best-card__sold';
+        sold.textContent = 'Sold out today';
+        card.appendChild(sold);
+      } else if (needsChoice) {
+        var link = doc.createElement('a');
+        link.className = 'btn btn--outline btn--sm';
+        link.href = 'order.html#item=' + encodeURIComponent(p.id);
+        link.innerHTML = icon('plus') + 'Choose options<span class="sr-only"> for ' + esc(it.name) + '</span>';
+        card.appendChild(link);
+      } else {
+        var btn = doc.createElement('button');
+        btn.className = 'btn btn--outline btn--sm';
+        btn.type = 'button';
+        btn.setAttribute('data-add-to-cart', p.id);
+        btn.setAttribute('data-name', it.name);
+        btn.innerHTML = icon('plus') + 'Add to order<span class="sr-only"> — ' + esc(it.name) + '</span>';
+        card.appendChild(btn);
+      }
+      grid.appendChild(card);
     });
   }
 
@@ -307,11 +510,11 @@
   }
 
   function initQuickAdd() {
-    $$('[data-add-to-cart]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        cart.add(btn.getAttribute('data-add-to-cart'), 1);
-        toast((btn.getAttribute('data-name') || 'Item') + ' added to your order', { label: 'View order', href: 'order.html#cart' });
-      });
+    doc.addEventListener('click', function (e) {
+      var btn = e.target.closest && e.target.closest('[data-add-to-cart]');
+      if (!btn) return;
+      cart.add(btn.getAttribute('data-add-to-cart'), 1);
+      toast((btn.getAttribute('data-name') || 'Item') + ' added to your order', { label: 'View order', href: 'order.html#cart' });
     });
   }
 
@@ -378,7 +581,7 @@
     });
     if (firstInvalid) {
       firstInvalid.focus();
-      if (firstInvalid.scrollIntoView && !reduceMotion) firstInvalid.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      if (firstInvalid.scrollIntoView && !motionOff()) firstInvalid.scrollIntoView({ block: 'center', behavior: 'smooth' });
     }
     return !firstInvalid;
   }
@@ -629,7 +832,7 @@
   function initReveal() {
     var els = $$('.reveal');
     if (!els.length) return;
-    if (reduceMotion || !('IntersectionObserver' in window)) { els.forEach(function (el) { el.classList.add('is-in'); }); return; }
+    if (motionOff() || !('IntersectionObserver' in window)) { els.forEach(function (el) { el.classList.add('is-in'); }); return; }
     var io = new IntersectionObserver(function (entries) {
       entries.forEach(function (en) {
         if (en.isIntersecting) { en.target.classList.add('is-in'); io.unobserve(en.target); }
@@ -643,7 +846,7 @@
       $$('.strip__btn', strip).forEach(function (b) {
         b.addEventListener('click', function () {
           var dir = b.classList.contains('strip__btn--prev') ? -1 : 1;
-          track.scrollBy({ left: dir * track.clientWidth * 0.8, behavior: reduceMotion ? 'auto' : 'smooth' });
+          track.scrollBy({ left: dir * track.clientWidth * 0.8, behavior: motionOff() ? 'auto' : 'smooth' });
         });
       });
     });
@@ -668,7 +871,7 @@
     window.addEventListener('scroll', onScroll, { passive: true });
     onScroll();
     if (top) top.addEventListener('click', function () {
-      window.scrollTo({ top: 0, behavior: reduceMotion ? 'auto' : 'smooth' });
+      window.scrollTo({ top: 0, behavior: motionOff() ? 'auto' : 'smooth' });
       var main = $('#main');
       if (main) main.focus({ preventScroll: true });
     });
@@ -693,6 +896,11 @@
 
   /* ---------- Boot ---------- */
   function boot() {
+    renderAnnouncement();
+    renderHeaderHours();
+    renderRules();
+    renderMarketsLive();
+    renderBestsellers();
     renderHours();
     renderStatus();
     renderMarkets();
@@ -714,15 +922,19 @@
 
   window.BDP = {
     $: $, $$: $$, esc: esc, icon: icon, money: money, store: store, cart: cart, lineKey: lineKey, toast: toast,
-    time: { nowLocal: nowLocal, toMin: toMin, fmtTime: fmtTime, addDays: addDays, isoDate: isoDate, parseISO: parseISO, fmtDate: fmtDate, hoursFor: hoursFor, DAY_NAMES: DAY_NAMES },
+    imgUrl: imgUrl, dayList: dayList,
+    time: { nowLocal: nowLocal, toMin: toMin, fmtTime: fmtTime, addDays: addDays, isoDate: isoDate, parseISO: parseISO, fmtDate: fmtDate, hoursFor: hoursFor, closureNote: closureNote, DAY_NAMES: DAY_NAMES },
     forms: {
       validateForm: validateForm, showFieldError: showFieldError, fieldError: fieldError, bindLiveValidation: bindLiveValidation,
       setStatus: setStatus, clearStatus: clearStatus, collectLines: collectLines, sendForm: sendForm,
       honeypotTripped: honeypotTripped, contactFallbackHTML: contactFallbackHTML
     },
-    reduceMotion: reduceMotion
+    get reduceMotion() { return motionOff(); }
   };
 
-  if (doc.readyState === 'loading') doc.addEventListener('DOMContentLoaded', boot);
+  // Wait for changes published from the admin panel (see live-data.js), then draw the page.
+  var ready = window.BDP_LIVE && window.BDP_LIVE.ready;
+  if (ready) ready.then(boot, boot);
+  else if (doc.readyState === 'loading') doc.addEventListener('DOMContentLoaded', boot);
   else boot();
 })();

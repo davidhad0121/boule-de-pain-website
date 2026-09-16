@@ -12,11 +12,7 @@
     var $ = B.$, $$ = B.$$, esc = B.esc, icon = B.icon, money = B.money, cart = B.cart, T = B.time, F = B.forms;
     var ORD = SITE.ordering || {};
     var GROUPS = MENU.addonGroups || {};
-    var WIX = 'https://static.wixstatic.com/media/';
-
-    function wixImg(id, w, h) {
-      return WIX + id + '/v1/fill/w_' + w + ',h_' + h + ',al_c,q_80,usm_0.66_1.00_0.01,enc_auto/' + id.replace(/~/g, '_');
-    }
+    var imgUrl = B.imgUrl;
     function norm(s) { return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase(); }
     function plural(n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); }
     function round2(n) { return Math.round(n * 100) / 100; }
@@ -27,6 +23,7 @@
     MENU.categories.forEach(function (cat) {
       (cat.groups || [{ title: '', items: cat.items || [] }]).forEach(function (g) {
         g.items.forEach(function (it) {
+          if (it.hidden) return;
           var id = cat.id + '.' + it.slug;
           items.set(id, Object.assign({}, it, {
             id: id, cat: cat.id, catName: cat.name, section: g.title || '',
@@ -54,7 +51,7 @@
     }
     function lineValid(l) {
       var it = items.get(l.id);
-      if (!it) return false;
+      if (!it || it.soldOut) return false;
       if (it.sizes ? !sizeOf(it, l.size) : !!l.size) return false;
       var allowed = groupsFor(it, l.size);
       var picks = l.addons || [];
@@ -79,11 +76,21 @@
       return parts;
     }
     // Lines saved before this version (or edited menus) that no longer make sense are dropped
+    var dropped = cart.all().filter(function (l) { return !lineValid(l); });
     cart.prune(lineValid);
+    if (dropped.length) {
+      var names = dropped.map(function (l) { var it = items.get(l.id); return it ? it.name : null; }).filter(Boolean);
+      setTimeout(function () {
+        B.toast(names.length
+          ? names.filter(function (n, i) { return names.indexOf(n) === i; }).join(', ') + (names.length === 1 ? ' is' : ' are') + ' sold out or changed, so we removed ' + (names.length === 1 ? 'it' : 'them') + ' from your order.'
+          : 'Some items in your order are no longer on the menu, so we removed them.');
+      }, 400);
+    }
 
     /* ---------- Menu rendering ---------- */
     function badges(it) {
       var b = [];
+      if (it.soldOut) b.push(['badge--sold', 'Sold out']);
       if (it.popular) b.push(['badge--pop', 'Bestseller']);
       (it.labels || []).forEach(function (l) { b.push(['badge--spice', l + ' spice']); });
       if (it.sizes) b.push(['', it.sizes.length + ' sizes']);
@@ -97,16 +104,18 @@
       var b = badges(it);
       var q = cart.qtyFor(it.id);
       var search = norm([it.name, it.desc, it.catName, it.section, (it.sizes || []).map(function (s) { return s.name; }).join(' ')].join(' '));
-      return '<article class="dish' + (it.img ? '' : ' dish--noimg') + (q ? ' in-cart' : '') + '" data-id="' + esc(it.id) + '" data-search="' + esc(search) + '">' +
+      var thumb = it.img ? imgUrl(it.img, 248, 248) : '';
+      var uploaded = it.img && it.img.indexOf('upload:') === 0;
+      return '<article class="dish' + (thumb ? '' : ' dish--noimg') + (q ? ' in-cart' : '') + (it.soldOut ? ' is-soldout' : '') + '" data-id="' + esc(it.id) + '" data-search="' + esc(search) + '">' +
         '<div class="dish__body">' +
           '<h' + level + ' class="dish__name"><button type="button" class="dish__btn" data-open-item>' + esc(it.name) + '</button></h' + level + '>' +
           (it.desc ? '<p class="dish__desc">' + esc(it.desc) + '</p>' : '') +
           (b.length ? '<ul class="dish__badges">' + b.map(function (x) { return '<li class="badge ' + x[0] + '">' + esc(x[1]) + '</li>'; }).join('') + '</ul>' : '') +
           '<div class="dish__foot"><span class="dish__price">' + (it.sizes ? 'From ' : '') + money(it.price) + '</span>' +
             '<span class="dish__incart" data-incart' + (q ? '' : ' hidden') + '>' + q + ' in your order</span>' +
-            '<span class="add-btn" aria-hidden="true">' + icon('plus') + 'Add</span></div>' +
+            (it.soldOut ? '<span class="add-btn add-btn--sold" aria-hidden="true">Sold out</span>' : '<span class="add-btn" aria-hidden="true">' + icon('plus') + 'Add</span>') + '</div>' +
         '</div>' +
-        (it.img ? '<img class="dish__img" src="' + wixImg(it.img, 248, 248) + '" srcset="' + wixImg(it.img, 124, 124) + ' 1x, ' + wixImg(it.img, 248, 248) + ' 2x" width="124" height="124" alt="" loading="lazy" decoding="async">' : '') +
+        (thumb ? '<img class="dish__img" src="' + esc(thumb) + '"' + (uploaded ? '' : ' srcset="' + imgUrl(it.img, 124, 124) + ' 1x, ' + thumb + ' 2x"') + ' width="124" height="124" alt="" loading="lazy" decoding="async">' : '') +
       '</article>';
     }
     function renderMenu() {
@@ -216,9 +225,14 @@
         return Math.max(m, it ? it.notice : 0);
       }, extra || 0);
     }
+    function deliveryDays() { return ORD.deliveryDays || [1, 2, 3, 4, 5]; }
+    function deliveryHint() {
+      var list = B.dayList(deliveryDays(), 'to', 'and');
+      return list ? 'Deliveries run ' + list + '. ' : 'Delivery isn’t available right now. ';
+    }
     function isAvailable(m, d) {
       if ((SITE.closedDates || []).indexOf(T.isoDate(d)) > -1) return false;
-      if (m === 'delivery' && (ORD.deliveryDays || [1, 2, 3, 4, 5]).indexOf(d.getUTCDay()) < 0) return false;
+      if (m === 'delivery' && deliveryDays().indexOf(d.getUTCDay()) < 0) return false;
       return !!T.hoursFor(d);
     }
     function earliest(m, notice) {
@@ -244,7 +258,12 @@
       var min = earliest(m, notice);
       if (d < min) return 'The earliest available date' + (notice ? ' for this order' : '') + ' is ' + T.fmtDate(min, { weekday: 'long' }) + '.';
       if (d > latest()) return 'Please choose a date within the next ' + (ORD.maxDaysAhead || 42) + ' days.';
-      if (!isAvailable(m, d)) return m === 'delivery' ? 'We don’t deliver on weekends. Please choose a weekday.' : 'The bakery is closed that day. Please choose another date.';
+      if (!isAvailable(m, d)) {
+        var note = T.closureNote(d);
+        if (note || !T.hoursFor(d)) return 'The bakery is closed that day' + (note ? ' (' + note + ')' : '') + '. Please choose another date.';
+        var days = B.dayList(deliveryDays(), 'through', 'and');
+        return days ? 'We deliver ' + days + '. Please choose one of those days.' : 'Delivery isn’t available right now. Please choose pickup.';
+      }
       return '';
     }
     function fillWindows(select, m, d, keep) {
@@ -340,7 +359,7 @@
       pending = { id: id, editKey: opts.editKey || null, preset: opts.preset || null };
       openModal(opts.opener);
       var notice = Math.max(cartNotice(), it.notice || 0);
-      if (!opts.editKey && !dispatchOk(dispatch, notice)) openDispatch(it);
+      if (!opts.editKey && !it.soldOut && !dispatchOk(dispatch, notice)) openDispatch(it);
       else renderItem(it);
     }
     function openDispatchOnly(opener) {
@@ -372,7 +391,7 @@
       var mode = $('input[name="d-mode"]:checked', dForm).value;
       var min = earliest(mode, notice);
       $('label[for="d-time"]', dForm).firstChild.nodeValue = mode === 'delivery' ? 'Delivery window ' : 'Pickup time ';
-      $('[data-d-hint]', dForm).textContent = (mode === 'delivery' ? 'Deliveries run Monday to Friday. ' : 'Pickup at ' + SITE.address.street + ', ' + SITE.address.city + '. ') +
+      $('[data-d-hint]', dForm).textContent = (mode === 'delivery' ? deliveryHint() : 'Pickup at ' + SITE.address.street + ', ' + SITE.address.city + '. ') +
         'Earliest: ' + T.fmtDate(min, { weekday: 'long' }) + '.';
       var note = $('[data-d-note]', dForm);
       note.hidden = !(it && it.notice);
@@ -430,7 +449,7 @@
       var box = $('[data-item-body]', iForm);
       var mode = currentMode();
       box.innerHTML =
-        (it.img ? '<img class="modal__img" src="' + wixImg(it.img, 960, 600) + '" width="960" height="600" alt="">' : '') +
+        (it.img && imgUrl(it.img, 960, 600) ? '<img class="modal__img" src="' + esc(imgUrl(it.img, 960, 600)) + '" width="960" height="600" alt="">' : '') +
         '<div class="modal__inner">' +
           '<div class="modal__dispatch">' + icon(mode === 'delivery' ? 'truck' : 'store') +
             '<span>' + (dispatch ? (mode === 'delivery' ? 'Delivery' : 'Pickup') + ' · ' + esc(T.fmtDate(T.parseISO(dispatch.date))) + ' · ' + esc(dispatch.time) : '') + '</span>' +
@@ -452,7 +471,11 @@
         '</div>';
       renderGroups(it, size, preset.addons || []);
       $('[data-qty-out]', iForm).textContent = qty;
-      $('[data-item-submit-label]', iForm).textContent = pending && pending.editKey ? 'Update order' : 'Add to order';
+      $('[data-item-submit-label]', iForm).textContent = it.soldOut ? 'Sold out' : pending && pending.editKey ? 'Update order' : 'Add to order';
+      var submitBtn = $('button[type="submit"]', iForm);
+      if (submitBtn) submitBtn.disabled = !!it.soldOut;
+      var soldNote = $('[data-sold-note]', iForm);
+      if (soldNote) soldNote.hidden = !it.soldOut;
       updateItemTotal();
       var ctxLabel = it.catName.replace(/\s+\d+ days in advance$/i, '') + (it.section ? ' · ' + it.section : '');
       setContext((pending && pending.stepped ? 'Step 2 of 2 · ' : '') + ctxLabel);
@@ -544,6 +567,7 @@
           } else err.hidden = true;
         });
         if (firstBad) { firstBad.focus(); return; }
+        if (it.soldOut) return;
         var sel = currentSelection();
         var editing = pending.editKey;
         if (editing) cart.replaceLine(editing, sel, qty); else cart.addLine(sel, qty);
@@ -663,7 +687,7 @@
         var details = lineDetails(l);
         var canEdit = !!(it.sizes || (it.addons || []).length || l.note);
         return '<li class="cart-line" data-key="' + esc(l.key) + '">' +
-          (it.img ? '<img class="cart-line__img" src="' + wixImg(it.img, 112, 112) + '" alt="" width="56" height="56" loading="lazy">' : '<span class="cart-line__img" aria-hidden="true">' + icon('bag') + '</span>') +
+          (it.img && imgUrl(it.img, 112, 112) ? '<img class="cart-line__img" src="' + esc(imgUrl(it.img, 112, 112)) + '" alt="" width="56" height="56" loading="lazy">' : '<span class="cart-line__img" aria-hidden="true">' + icon('bag') + '</span>') +
           '<div><div class="cart-line__name">' + esc(it.name) + '</div>' +
           (details.length ? '<div class="cart-line__meta">' + details.map(esc).join(' · ') + '</div>' : '') +
           (l.note ? '<div class="cart-line__meta">Note: “' + esc(l.note) + '”</div>' : '') +
@@ -761,7 +785,7 @@
       fillWindows(timeEl, mode, d, dispatch && dispatch.time);
       var hint = $('[data-date-hint]', form);
       if (hint) {
-        hint.textContent = (mode === 'delivery' ? 'Deliveries run Monday to Friday. ' : 'Pickup during store hours. ') +
+        hint.textContent = (mode === 'delivery' ? deliveryHint() : 'Pickup during store hours. ') +
           'Earliest: ' + T.fmtDate(min, { weekday: 'long' }) + (notice ? ' (some items need ' + notice + ' days’ notice).' : '.');
       }
       var timeLabel = $('label[for="o-time"]', form);
@@ -910,14 +934,35 @@
       dispatch = { mode: dispatch.mode === 'delivery' ? 'delivery' : 'pickup' };
       B.store.set(DKEY, dispatch);
     }
+    if (!deliveryDays().length) {
+      $$('input[value="delivery"]').forEach(function (r) {
+        r.disabled = true;
+        var lab = r.closest('label');
+        if (lab) lab.classList.add('is-disabled');
+      });
+      if (dispatch && dispatch.mode === 'delivery') { dispatch = { mode: 'pickup' }; B.store.set(DKEY, dispatch); }
+    }
     renderDispatchBar();
     renderCart();
     renderCartBar();
     updateCheckout();
     if (location.hash === '#cart') openDrawer('cart');
+    // order.html#item=cakes.mango-cake opens that item (used by the home page bestsellers)
+    var deep = /^#item=(.+)$/.exec(location.hash);
+    if (deep) {
+      var deepId = decodeURIComponent(deep[1]);
+      history.replaceState(null, '', location.pathname + location.search);
+      if (items.has(deepId)) {
+        var deepCard = $('.dish[data-id="' + (window.CSS && CSS.escape ? CSS.escape(deepId) : deepId) + '"]', menuRoot);
+        if (deepCard) deepCard.scrollIntoView({ block: 'center' });
+        openItem(deepId, { opener: deepCard ? $('[data-open-item]', deepCard) : null });
+      }
+    }
     setInterval(renderDispatchBar, 60 * 1000);
   }
 
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+  var ready = window.BDP_LIVE && window.BDP_LIVE.ready;
+  if (ready) ready.then(start, start);
+  else if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
   else start();
 })();

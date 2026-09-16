@@ -60,6 +60,34 @@ It answers from this site's menu (`menu-data.js`), hours and ordering rules
   `ALLOWED_ORIGINS` setting (see the chatbot folder's `README.md`).
 - **Hide the chat button:** set `workerUrl` to `""`.
 
+## Admin panel
+
+`admin.html` is the door to the admin panel, where you change prices, items,
+photos, hours, closed days, the announcement bar, delivery rules and farmers
+markets without touching any files.
+
+- **On your computer:** double-click `admin.html` for test mode (username
+  `admin`, passcode `1234`). Changes save only in that browser and show on
+  this copy of the site.
+- **Live:** follow the guide in the `boule-de-pain-admin` folder, then paste
+  the panel's address into `assets/js/site-config.js`:
+
+  ```
+  "admin": { "url": "https://bouledepain-admin.YOUR-NAME.workers.dev" }
+  ```
+
+  The site then reads published changes from the panel (`assets/js/live-data.js`).
+  If the panel can't be reached, the site falls back to its own files.
+
+## Accessibility
+
+The blue button in the bottom-right corner opens the accessibility options
+(text size, spacing, readable font, contrast, highlighted links, reading
+guide, big cursor, stopped animations, read aloud). It's in
+`assets/js/a11y.js` and the end of `styles.css`. The site itself is built and
+tested for WCAG 2.1 AA; the panel is extra help, not a substitute, so keep
+new pages using the same headings, labels and colors.
+
 ## Where to change things
 
 | What | File |
@@ -69,9 +97,11 @@ It answers from this site's menu (`menu-data.js`), hours and ordering rules
 | Page text and images | the `.html` files |
 | Colors and fonts | `assets/css/styles.css` (top of the file) |
 | Chatbot connection | `assets/js/site-config.js` (`chatbot` → `workerUrl`) |
+| Admin panel connection | `assets/js/site-config.js` (`admin` → `url`) |
+| Accessibility options | `assets/js/a11y.js`, end of `assets/css/styles.css` |
 
-Hours also appear as plain text in each page's header, so update the `.html`
-files too if they change.
+Hours, the cutoff time, delivery days and market days in the page text all
+update from these files (and from the admin panel) when the page loads.
 
 To add a holiday closure, add the date to `closedDates`, like
 `"closedDates": ["2026-12-25"]`. The open/closed sign and the order dates will

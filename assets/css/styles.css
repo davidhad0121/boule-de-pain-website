@@ -673,6 +673,29 @@ body.has-action-bar .site-footer { padding-bottom: 72px; }
 .js .reveal.is-in { opacity: 1; transform: none; }
 @media (prefers-reduced-motion: reduce) { .js .reveal { opacity: 1; transform: none; } }
 
+/* ---------- Wholesale price list, terms and notices ---------- */
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius-sm); background: #fff; }
+.table-wrap:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+.price-table { width: 100%; border-collapse: collapse; font-size: .98rem; }
+.price-table th, .price-table td { padding: 12px 16px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+.price-table thead th { background: var(--mist); color: var(--ink); font-weight: 500; font-size: .85rem; letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
+.price-table tbody tr:last-child > * { border-bottom: 0; }
+.price-table tbody th { font-weight: 500; color: var(--ink); min-width: 12ch; }
+.price-table tbody th small { display: block; font-weight: 400; color: var(--muted); font-size: .85rem; margin-top: 2px; }
+.price-table td { color: var(--text); }
+[data-ws-price-note] { margin: 12px 0 0; }
+.ws-card__text { margin: 0; }
+.ws-terms { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.ws-terms li { display: flex; gap: 12px; align-items: flex-start; padding: 14px 18px; background: var(--pink-wash); border-radius: var(--radius-sm); }
+.ws-terms .icon { flex: none; width: 20px; height: 20px; margin-top: 3px; color: var(--success); }
+.ws-terms span { min-width: 0; overflow-wrap: anywhere; }
+.notice { display: flex; gap: 12px; align-items: flex-start; padding: 18px 20px; border-radius: var(--radius-sm); background: var(--pink-soft); color: var(--ink); }
+.notice .icon { flex: none; width: 22px; height: 22px; margin-top: 2px; }
+.notice p { margin: 0; }
+@media (max-width: 560px) {
+  .price-table th, .price-table td { padding: 10px 12px; }
+}
+
 /* ---------- Prose (policies, accessibility) ---------- */
 .prose { font-size: 1.05rem; }
 .prose h2 { font-size: clamp(1.5rem, 2.6vw, 2rem); margin-top: 1.8em; }

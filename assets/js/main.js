@@ -199,6 +199,67 @@
     return live && live.source !== 'files' && live.menu ? live : null;
   }
 
+  /* Wholesale page as published in the admin panel */
+  function renderWholesale() {
+    var ws = SITE.wholesale;
+    if (!liveData() || !ws || typeof ws !== 'object' || !$('[data-ws-intro]')) return;
+    var list = function (v) { return Array.isArray(v) ? v : []; };
+    $$('[data-ws-intro]').forEach(function (el) { el.textContent = ws.intro || ''; });
+    $$('[data-ws-categories]').forEach(function (grid) {
+      grid.innerHTML = list(ws.categories).map(function (c) {
+        return '<div class="card reveal is-in"><h3>' + esc(c.title) + '</h3><p class="muted ws-card__text">' + esc(c.text) + '</p></div>';
+      }).join('');
+      grid.hidden = !list(ws.categories).length;
+    });
+    var products = list(ws.products), show = !!ws.showPrices;
+    $$('[data-ws-products-section]').forEach(function (el) { el.hidden = !products.length; });
+    $$('[data-ws-price-col]').forEach(function (el) { el.hidden = !show; });
+    $$('[data-ws-products]').forEach(function (body) {
+      body.innerHTML = products.map(function (p) {
+        var price = typeof p.price === 'number' ? money(p.price) : 'Call';
+        return '<tr><th scope="row">' + esc(p.name) + (p.note ? '<small>' + esc(p.note) + '</small>' : '') + '</th>' +
+          '<td>' + esc(p.pack) + '</td>' + (show ? '<td>' + esc(price) + '</td>' : '') + '<td>' + esc(p.minQty) + '</td></tr>';
+      }).join('');
+    });
+    $$('[data-ws-price-note]').forEach(function (el) {
+      el.textContent = show ? (ws.priceNote || '') : 'Call or send the form below for pricing. It’s tailored to your volume.';
+      el.hidden = !el.textContent;
+    });
+    var terms = list(ws.terms);
+    $$('[data-ws-terms-section]').forEach(function (el) { el.hidden = !terms.length; });
+    $$('[data-ws-terms]').forEach(function (ul) {
+      ul.innerHTML = terms.map(function (t) { return '<li>' + icon('check') + '<span>' + esc(t) + '</span></li>'; }).join('');
+    });
+    var open = ws.accepting !== false;
+    $$('[data-ws-form]').forEach(function (el) { el.hidden = !open; });
+    $$('[data-ws-closed]').forEach(function (el) { el.hidden = open; });
+    $$('[data-ws-closed-text]').forEach(function (el) {
+      el.textContent = ws.closedMessage || 'We’re not taking new wholesale accounts right now.';
+    });
+    var photos = list(ws.photos).filter(function (p) { return p && imgUrl(p.img, 480, 480); });
+    $$('[data-ws-strip]').forEach(function (track) {
+      $$('[data-ws-upload]', track).forEach(function (el) { el.remove(); });
+      photos.slice().reverse().forEach(function (p) {
+        var b = doc.createElement('button');
+        b.type = 'button';
+        b.className = 'ig-tile';
+        b.setAttribute('data-ws-upload', '');
+        b.setAttribute('data-lightbox', 'wholesale');
+        b.setAttribute('data-full', imgUrl(p.img, 1400, 1400));
+        b.setAttribute('data-caption', p.alt || '');
+        var im = doc.createElement('img');
+        im.src = imgUrl(p.img, 480, 480);
+        im.alt = p.alt || 'Boule de Pain bakery photo';
+        im.width = 368;
+        im.height = 368;
+        im.loading = 'lazy';
+        im.decoding = 'async';
+        b.appendChild(im);
+        track.insertBefore(b, track.firstChild);
+      });
+    });
+  }
+
   /* Farmers markets as published in the admin panel */
   function renderMarketsLive() {
     if (!liveData() || !Array.isArray(SITE.markets)) return;
@@ -900,6 +961,7 @@
     renderHeaderHours();
     renderRules();
     renderMarketsLive();
+    renderWholesale();
     renderBestsellers();
     renderHours();
     renderStatus();

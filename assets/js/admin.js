@@ -1,6 +1,6 @@
 /* Boule de Pain — admin panel
    Edit the menu (prices, sizes, extras, photos, sold out / hidden), store hours and closed dates,
-   the announcement bar, ordering rules and farmers markets, then publish. Every publish is kept
+   the announcement bar, ordering rules, farmers markets and the wholesale page, then publish. Every publish is kept
    in a history you can restore.
 
    It runs in two places:
@@ -22,6 +22,9 @@
   const WEEK = [1, 2, 3, 4, 5, 6, 0];
   const SIZE_TYPES = [['', 'Any size'], ['8in', '8" cakes'], ['10in', '10" cakes'], ['quarter', '1/4 sheet'], ['half', '1/2 sheet'], ['full', 'Full sheet']];
   const SPICE = ['', 'Mild', 'Medium', 'Hot'];
+  // Wholesale page defaults (filled in from the site data when the panel is built)
+  const WS_DEFAULT = {"intro":"We supply artisan bread and pastries to caf\u00e9s, restaurants, hotels and retailers. Everything is baked in-house with premium ingredients, and wholesale pricing is tailored to your volume and business needs.","accepting":true,"closedMessage":"We\u2019re not taking new wholesale accounts right now. Please check back soon, or call us to join the waiting list.","categories":[{"title":"Breads","text":"Baguettes, sourdough, whole wheat, rye, olive, olive & za\u2019atar, fig & walnut, cranberry & walnut and multigrain."},{"title":"Viennoiseries","text":"Plain, chocolate and almond croissants, danishes, turnovers, palmiers, kouign amann, cannel\u00e9s, scones and donuts."},{"title":"Cakes & pastries","text":"Whole cakes, gluten-free cakes, coffee cakes and individual mousse pastries."}],"products":[],"showPrices":false,"priceNote":"Prices are per unit before tax. Volume discounts available.","terms":[],"photos":[]};
+  const WS_LIMIT = { categories: 12, products: 200, terms: 15, photos: 24 };
 
   /* ------------------------------------------------------------------ small helpers */
   const $ = (sel, el) => (el || doc).querySelector(sel);
@@ -100,6 +103,9 @@
     download: '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
     upload: '<path d="M12 20V9M7 14l5-5 5 5M5 4h14"/>',
     logout: '<path d="M14 4h5v16h-5M10 8l-4 4 4 4M6 12h10"/>',
+    truck: '<path d="M3 6.5h11v10H3zM14 10h4l3 3.5v3h-7"/><circle cx="7" cy="17.5" r="1.8"/><circle cx="17.5" cy="17.5" r="1.8"/>',
+    left: '<path d="M19 12H5M11 6l-6 6 6 6"/>',
+    right: '<path d="M5 12h14M13 6l6 6-6 6"/>',
     copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/>',
   };
   const icon = (name) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${ICONS[name] || ''}</svg>`;
@@ -163,6 +169,7 @@
           maxDaysAhead: o.maxDaysAhead || 42, windowMinutes: o.windowMinutes || 180,
         },
         markets: (S.markets || []).map((m) => ({ day: m.day, locations: m.locations.slice() })),
+        wholesale: S.wholesale && typeof S.wholesale === 'object' ? S.wholesale : WS_DEFAULT,
       },
       menu: { addonGroups: M.addonGroups || {}, categories: M.categories || [] },
     });
@@ -175,6 +182,7 @@
     d.site.closures = (d.site.closures || []).filter((c) => c.date).map((c) => ({ date: c.date, note: trim(c.note) }))
       .sort((a, b) => (a.date < b.date ? -1 : 1));
     d.site.markets.forEach((m) => { m.locations = m.locations.map(trim).filter(Boolean); });
+    d.site.wholesale = normalizeWholesale(d.site.wholesale, trim);
     Object.values(d.menu.addonGroups).forEach((g) => {
       g.name = trim(g.name);
       g.options.forEach((o) => { o.name = trim(o.name); o.price = round2(o.price); });
@@ -206,6 +214,38 @@
       });
     });
     return d;
+  }
+
+  function withWholesale(d) {
+    if (d && d.site && (!d.site.wholesale || typeof d.site.wholesale !== 'object')) d.site.wholesale = clone(WS_DEFAULT);
+    return d;
+  }
+  // Tidies the wholesale info in place (the open Wholesale view keeps a reference to it).
+  function normalizeWholesale(w, trim) {
+    if (!w || typeof w !== 'object') w = clone(WS_DEFAULT);
+    const tidy = tidyWholesale(w, trim);
+    Object.keys(w).forEach((k) => { delete w[k]; });
+    return Object.assign(w, tidy);
+  }
+  function tidyWholesale(w, trim) {
+    const lines = (v) => String(v == null ? '' : v).replace(/\r\n?/g, '\n').replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n').trim();
+    const arr = (v) => (Array.isArray(v) ? v : []);
+    return {
+      intro: lines(w.intro),
+      accepting: w.accepting !== false,
+      closedMessage: trim(w.closedMessage),
+      categories: arr(w.categories).map((c) => ({ title: trim(c && c.title), text: trim(c && c.text) }))
+        .filter((c) => c.title || c.text),
+      products: arr(w.products).map((p) => {
+        p = p || {};
+        const price = p.price == null || p.price === '' ? null : (typeof p.price === 'number' ? round2(p.price) : parsePrice(p.price));
+        return { name: trim(p.name), pack: trim(p.pack), price: price == null && p.price != null && p.price !== '' ? p.price : price, minQty: trim(p.minQty), note: trim(p.note) };
+      }).filter((p) => p.name || p.pack || p.minQty || p.note || p.price != null),
+      showPrices: w.showPrices === true,
+      priceNote: trim(w.priceNote),
+      terms: arr(w.terms).map(trim).filter(Boolean),
+      photos: arr(w.photos).filter((ph) => ph && /^upload:/.test(ph.img || '')).map((ph) => ({ img: ph.img, alt: trim(ph.alt) })),
+    };
   }
 
   /* Friendly checks before publishing. Each problem says where to look. */
@@ -259,6 +299,27 @@
       if (!m.locations.some((l) => String(l).trim())) add(`${DAY[m.day]} markets need at least one market name.`, { tab: 'markets' });
     });
     if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(d.site.ordering.cutoff || '')) add('The order cutoff needs a time.', { tab: 'ordering' });
+    const ws = d.site.wholesale;
+    if (ws) {
+      const go = (sel) => ({ tab: 'wholesale', sel });
+      const long = (v, max) => String(v || '').length > max;
+      if (long(ws.intro, 600)) add('The wholesale introduction is over 600 characters.', go('#ws-intro'));
+      if (long(ws.closedMessage, 300)) add('The “not taking new accounts” message is over 300 characters.', go('#ws-closed'));
+      if (long(ws.priceNote, 200)) add('The price list note is over 200 characters.', go('#ws-note'));
+      (ws.categories || []).forEach((c, i) => {
+        if (!String(c.title || '').trim() && String(c.text || '').trim()) add(`Wholesale category ${i + 1} needs a name.`, go(`#ws-cat-${i}-t`));
+      });
+      (ws.products || []).forEach((p, i) => {
+        const name = String(p.name || '').trim();
+        const blank = !name && !String(p.pack || '').trim() && !String(p.minQty || '').trim() && !String(p.note || '').trim() && (p.price == null || p.price === '');
+        if (blank) return;
+        if (!name) add(`Wholesale product ${i + 1} needs a name.`, go(`#ws-pr-${i}-name`));
+        if (p.price != null && p.price !== '' && parsePrice(p.price) == null) add(`The wholesale price of “${name || `product ${i + 1}`}” isn’t a valid price.`, go(`#ws-pr-${i}-price`));
+      });
+      (ws.photos || []).forEach((ph, i) => {
+        if (!String(ph.alt || '').trim()) add(`Wholesale photo ${i + 1} needs a short description (for people using screen readers).`, go(`#ws-ph-${i}-alt`));
+      });
+    }
     return out;
   }
 
@@ -295,6 +356,16 @@
     if (before.site.announcement !== after.site.announcement) lines.push(after.site.announcement ? 'Announcement updated' : 'Announcement bar turned off');
     if (!same(before.site.ordering, after.site.ordering)) lines.push('Ordering rules changed');
     if (!same(before.site.markets, after.site.markets)) lines.push('Farmers markets changed');
+    const wb = before.site.wholesale || {}, wa = after.site.wholesale || {};
+    if (!same(wb, wa)) {
+      if (!!wb.accepting !== !!wa.accepting && wb.accepting != null) lines.push(wa.accepting ? 'Wholesale: taking new accounts again' : 'Wholesale: not taking new accounts');
+      const len = (x, k) => (x[k] || []).length;
+      if (!same(wb.products, wa.products)) lines.push(`Wholesale price list changed (${plural(len(wa, 'products'), 'product')})`);
+      if (!!wb.showPrices !== !!wa.showPrices) lines.push(wa.showPrices ? 'Wholesale prices shown on the website' : 'Wholesale prices hidden on the website');
+      if (!same(wb.photos, wa.photos)) lines.push('Wholesale photos changed');
+      if (wb.intro !== wa.intro || !same(wb.categories, wa.categories) || !same(wb.terms, wa.terms) ||
+          wb.closedMessage !== wa.closedMessage || wb.priceNote !== wa.priceNote) lines.push('Wholesale page text changed');
+    }
     return lines;
   }
 
@@ -464,7 +535,12 @@
     imageUrl(ref, variant) { return this.urls.get(`${ref.slice(7)}:${variant === 'thumb' ? 'thumb' : 'full'}`) || ''; },
     async preload(docs) {
       const ids = new Set();
-      docs.filter(Boolean).forEach((d) => eachItem(d, (it) => { if (it.img && it.img.startsWith('upload:')) ids.add(it.img.slice(7)); }));
+      docs.filter(Boolean).forEach((d) => {
+        eachItem(d, (it) => { if (it.img && it.img.startsWith('upload:')) ids.add(it.img.slice(7)); });
+        ((d.site && d.site.wholesale && d.site.wholesale.photos) || []).forEach((ph) => {
+          if (ph && String(ph.img || '').startsWith('upload:')) ids.add(ph.img.slice(7));
+        });
+      });
       for (const id of ids) {
         if (this.urls.has(`${id}:full`)) continue;
         try {
@@ -566,6 +642,7 @@
     ['hours', 'Hours & closed days', 'clock'],
     ['ordering', 'Announcement & ordering', 'megaphone'],
     ['markets', 'Farmers markets', 'market'],
+    ['wholesale', 'Wholesale', 'truck'],
     ['history', 'History & backup', 'history'],
     ['security', 'Login & security', 'lock'],
   ];
@@ -843,6 +920,7 @@
 
   async function startApp() {
     const loaded = await state.backend.load();
+    withWholesale(loaded.doc);
     state.published = { version: loaded.version, savedAt: loaded.savedAt, doc: loaded.doc };
     state.original = loaded.original || loaded.doc;
     state.draft = clone(loaded.doc);
@@ -851,7 +929,7 @@
     const saved = store.get(DRAFT_KEY, null);
     if (saved && saved.doc) {
       if (canon(normalized(saved.doc)) !== canon(normalized(loaded.doc))) {
-        state.draft = saved.doc;
+        state.draft = withWholesale(saved.doc);
         await state.backend.preload([saved.doc]);
         restoredNote = saved.base === loaded.version
           ? 'We brought back changes you hadn’t published yet.'
@@ -942,7 +1020,7 @@
     $$('[data-tab]').forEach((b) => {
       if (b.getAttribute('data-tab') === state.tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
     });
-    const views = { menu: viewMenu, extras: viewExtras, hours: viewHours, ordering: viewOrdering, markets: viewMarkets, history: viewHistory, security: viewSecurity };
+    const views = { menu: viewMenu, extras: viewExtras, hours: viewHours, ordering: viewOrdering, markets: viewMarkets, wholesale: viewWholesale, history: viewHistory, security: viewSecurity };
     const scrollY = window.scrollY;
     main.innerHTML = '';
     (views[state.tab] || viewMenu)(main);
@@ -968,6 +1046,7 @@
       if (go.tab === 'menu' && go.ii != null) el = $(`[data-path="${go.ci}.${go.gi}.${go.ii}"] [data-act="edit-item"]`);
       else if (go.tab === 'menu' && go.ci != null) el = $(`[data-cat="${go.ci}"] h2`);
       else if (go.tab === 'extras' && go.gid) el = $(`[data-gid="${go.gid}"] input`);
+      else if (go.sel) el = $(`#admin-main ${go.sel}`);
       el = el || $('#admin-main h1');
       if (el) { el.scrollIntoView({ block: 'center' }); el.focus(); }
     });
@@ -976,6 +1055,7 @@
   /* ------------------------------------------------------------------ publishing */
   async function publish(force) {
     normalize(state.draft);
+    if (state.tab === 'wholesale') renderTab();
     const problems = problemsIn(state.draft);
     if (problems.length) {
       const dlg = openDialog({
@@ -1053,6 +1133,7 @@
       if (choice === 'mine') publish(true);
       else if (choice === 'theirs') {
         const loaded = await state.backend.load();
+        withWholesale(loaded.doc);
         state.published = { version: loaded.version, savedAt: loaded.savedAt, doc: loaded.doc };
         state.draft = clone(loaded.doc);
         await state.backend.preload([loaded.doc]);
@@ -2161,6 +2242,210 @@
         [m.locations[li], m.locations[to]] = [m.locations[to], m.locations[li]];
         const edge = act === 'loc-up' ? to === 0 : to === m.locations.length - 1;
         changed({ rerender: true, focus: `[data-m="${mi}"] [data-l="${to}"] [data-act="${edge ? (act === 'loc-up' ? 'loc-down' : 'loc-up') : act}"]` });
+      }
+    });
+  }
+
+  /* ------------------------------------------------------------------ wholesale page */
+  function viewWholesale(main) {
+    withWholesale(state.draft);
+    const w = state.draft.site.wholesale;
+    ['categories', 'products', 'terms', 'photos'].forEach((k) => { if (!Array.isArray(w[k])) w[k] = []; });
+    const view = doc.createElement('div');
+    view.className = 'view ws';
+    const moveBtns = (i, len, what) =>
+      `<button type="button" class="icon-btn" data-act="up" aria-label="Move ${what} up"${i === 0 ? ' disabled' : ''}>${icon('up')}</button>` +
+      `<button type="button" class="icon-btn" data-act="down" aria-label="Move ${what} down"${i === len - 1 ? ' disabled' : ''}>${icon('down')}</button>` +
+      `<button type="button" class="icon-btn icon-btn--danger" data-act="del" aria-label="Remove ${what}">${icon('trash')}</button>`;
+    const counter = (id, v, max) => `<p class="hint" id="${id}-count"><span data-count-for="${id}">${String(v || '').length}</span> of ${max} characters</p>`;
+    const full = (k) => w[k].length >= WS_LIMIT[k];
+    const addBtn = (list, label) => `<button type="button" class="btn btn--quiet btn--sm" data-act="add" data-list="${list}"${full(list) ? ' disabled' : ''}>${icon('plus')}${label}</button>` +
+      (full(list) ? `<span class="hint"> The limit is ${WS_LIMIT[list]}.</span>` : '');
+    const siteLink = state.siteUrl ? `<a class="btn btn--quiet btn--sm" href="${esc(new URL('wholesale.html', new URL(state.siteUrl, location.href)).href)}" target="_blank" rel="noopener">${icon('external')}See the wholesale page<span class="sr-only"> (opens in a new tab)</span></a>` : '';
+
+    view.innerHTML =
+      '<div class="view__head"><div><h1 tabindex="-1">Wholesale</h1>' +
+        '<p class="muted">Everything on the website’s Wholesale page: the introduction, what you supply, a price list, how ordering works, photos, and whether you’re taking new accounts.</p></div>' +
+        (siteLink ? `<div class="view__actions">${siteLink}</div>` : '') + '</div>' +
+
+      // 1. accounts on/off
+      '<section class="card" aria-labelledby="ws-acc-title"><h2 id="ws-acc-title">New wholesale accounts</h2>' +
+        `<label class="switch"><input type="checkbox" id="ws-accepting"${w.accepting ? ' checked' : ''}><span>Taking new wholesale accounts</span></label>` +
+        `<p class="hint" data-acc-hint>${w.accepting ? 'The inquiry form is shown on the page.' : 'The inquiry form is hidden, and the message below is shown instead.'}</p>` +
+        `<div class="field field--gap"><label for="ws-closed">Message when you’re not taking new accounts</label>` +
+          `<textarea class="input" id="ws-closed" rows="2" maxlength="300" aria-describedby="ws-closed-count">${esc(w.closedMessage)}</textarea>${counter('ws-closed', w.closedMessage, 300)}</div>` +
+      '</section>' +
+
+      // 2. intro
+      '<section class="card" aria-labelledby="ws-intro-title"><h2 id="ws-intro-title">Introduction</h2>' +
+        '<div class="field"><label for="ws-intro">Text next to the photo at the top of the page</label>' +
+          `<textarea class="input" id="ws-intro" rows="4" maxlength="600" aria-describedby="ws-intro-count">${esc(w.intro)}</textarea>${counter('ws-intro', w.intro, 600)}</div>` +
+      '</section>' +
+
+      // 3. categories
+      '<section class="card" aria-labelledby="ws-cat-title"><h2 id="ws-cat-title">What we can supply</h2>' +
+        '<p class="muted">The boxes under “What we can supply”. Leave the list empty to hide them.</p>' +
+        (w.categories.length ? `<ol class="ws-list">${w.categories.map((c, i) => `<li class="ws-item" data-list="categories" data-i="${i}">` +
+          '<div class="ws-item__fields">' +
+            `<div class="field"><label for="ws-cat-${i}-t">Name</label><input class="input" id="ws-cat-${i}-t" data-k="title" maxlength="60" value="${esc(c.title)}" placeholder="e.g. Breads"></div>` +
+            `<div class="field"><label for="ws-cat-${i}-d">Description</label><textarea class="input" id="ws-cat-${i}-d" data-k="text" rows="2" maxlength="400">${esc(c.text)}</textarea></div>` +
+          `</div><div class="ws-item__acts">${moveBtns(i, w.categories.length, esc(c.title || `box ${i + 1}`))}</div></li>`).join('')}</ol>` : '<p class="empty">No boxes. This part of the page is hidden.</p>') +
+        addBtn('categories', 'Add a box') +
+      '</section>' +
+
+      // 4. price list
+      '<section class="card" aria-labelledby="ws-pr-title"><h2 id="ws-pr-title">Wholesale price list</h2>' +
+        '<p class="muted">Products you offer to businesses, with pack sizes and minimum orders. The price list only appears on the page when it has at least one product.</p>' +
+        `<label class="switch"><input type="checkbox" id="ws-show-prices"${w.showPrices ? ' checked' : ''}><span>Show prices on the website</span></label>` +
+        '<p class="hint">When this is off, the list shows products without prices and asks businesses to call or send the form for pricing. Products with no price show “Call”.</p>' +
+        `<div class="field field--gap"><label for="ws-note">Note under the price list (shown with prices)</label><input class="input" id="ws-note" maxlength="200" value="${esc(w.priceNote)}" placeholder="e.g. Prices are per unit before tax."></div>` +
+        (w.products.length ? `<ol class="ws-list">${w.products.map((p, i) => `<li class="ws-item" data-list="products" data-i="${i}">` +
+          '<div class="ws-item__fields ws-grid">' +
+            `<div class="field ws-grid__name"><label for="ws-pr-${i}-name">Product</label><input class="input" id="ws-pr-${i}-name" data-k="name" maxlength="90" value="${esc(p.name)}" placeholder="e.g. Classic baguette"></div>` +
+            `<div class="field"><label for="ws-pr-${i}-pack">Pack size</label><input class="input" id="ws-pr-${i}-pack" data-k="pack" maxlength="60" value="${esc(p.pack)}" placeholder="e.g. Case of 12"></div>` +
+            `<div class="field"><label for="ws-pr-${i}-price">Price <span class="muted">(optional)</span></label><input class="input" id="ws-pr-${i}-price" data-k="price" inputmode="decimal" autocomplete="off" value="${esc(typeof p.price === 'number' ? priceInput(p.price) : (p.price || ''))}" placeholder="$0.00"></div>` +
+            `<div class="field"><label for="ws-pr-${i}-min">Minimum order</label><input class="input" id="ws-pr-${i}-min" data-k="minQty" maxlength="60" value="${esc(p.minQty)}" placeholder="e.g. 2 cases"></div>` +
+            `<div class="field ws-grid__note"><label for="ws-pr-${i}-note">Note <span class="muted">(optional)</span></label><input class="input" id="ws-pr-${i}-note" data-k="note" maxlength="140" value="${esc(p.note)}" placeholder="e.g. Par-baked available"></div>` +
+          `</div><div class="ws-item__acts">${moveBtns(i, w.products.length, esc(p.name || `product ${i + 1}`))}</div></li>`).join('')}</ol>` : '<p class="empty">No products yet. The price list is hidden on the website.</p>') +
+        addBtn('products', 'Add a product') +
+      '</section>' +
+
+      // 5. terms
+      '<section class="card" aria-labelledby="ws-terms-title"><h2 id="ws-terms-title">How wholesale works</h2>' +
+        '<p class="muted">Short points about ordering: minimum order, notice needed, delivery area and days, payment terms. Shown as a checklist. Leave empty to hide.</p>' +
+        (w.terms.length ? `<ul class="sec-list">${w.terms.map((t, i) => `<li data-list="terms" data-i="${i}"><label class="sr-only" for="ws-term-${i}">Point ${i + 1}</label>` +
+          `<input class="input" id="ws-term-${i}" data-k="term" maxlength="200" value="${esc(t)}" placeholder="e.g. Order by 3 PM for next-day delivery">` +
+          `${moveBtns(i, w.terms.length, `point ${i + 1}`)}</li>`).join('')}</ul>` : '<p class="empty">No points. This part of the page is hidden.</p>') +
+        addBtn('terms', 'Add a point') +
+      '</section>' +
+
+      // 6. photos
+      '<section class="card" aria-labelledby="ws-ph-title"><h2 id="ws-ph-title">Photos</h2>' +
+        '<p class="muted">Your photos appear first in the “Fresh from our kitchen” strip, before the bakery’s existing photos. JPEG, PNG, WebP or iPhone photos; they’re resized automatically.</p>' +
+        (w.photos.length ? `<ol class="ws-photos">${w.photos.map((ph, i) => `<li class="ws-photo" data-list="photos" data-i="${i}">` +
+          `<div class="ws-photo__img">${photoUrl(ph.img, 'thumb') ? `<img src="${esc(photoUrl(ph.img, 'thumb'))}" alt="">` : `<div class="photo-box__empty">${icon('photo')}<span>Not available here</span></div>`}</div>` +
+          `<div class="field"><label for="ws-ph-${i}-alt">Description</label><input class="input" id="ws-ph-${i}-alt" data-k="alt" maxlength="140" value="${esc(ph.alt)}" placeholder="e.g. Baguettes on a cooling rack"></div>` +
+          `<div class="ws-photo__acts">` +
+            `<button type="button" class="icon-btn" data-act="up" aria-label="Move photo ${i + 1} earlier"${i === 0 ? ' disabled' : ''}>${icon('left')}</button>` +
+            `<button type="button" class="icon-btn" data-act="down" aria-label="Move photo ${i + 1} later"${i === w.photos.length - 1 ? ' disabled' : ''}>${icon('right')}</button>` +
+            `<button type="button" class="icon-btn icon-btn--danger" data-act="del" aria-label="Remove photo ${i + 1}">${icon('trash')}</button></div>` +
+          '</li>').join('')}</ol>` : '<p class="empty">No extra photos. The page shows the bakery’s existing photos.</p>') +
+        (full('photos') ? `<p class="hint">The limit is ${WS_LIMIT.photos} photos.</p>` :
+          `<label class="btn btn--quiet btn--sm file-btn">${icon('upload')}<span>Upload photos</span>` +
+          '<input type="file" class="sr-only" multiple data-ws-photo-input accept="image/jpeg,image/png,image/webp,image/heic,image/heif" aria-describedby="ws-ph-status"></label>') +
+        '<p class="hint" id="ws-ph-status" role="status" aria-live="polite" data-ws-ph-status></p>' +
+      '</section>';
+    main.appendChild(view);
+
+    const itemOf = (el) => {
+      const li = el.closest('[data-list]');
+      return li ? { list: li.getAttribute('data-list'), i: Number(li.getAttribute('data-i')) } : null;
+    };
+    const blank = { categories: () => ({ title: '', text: '' }), products: () => ({ name: '', pack: '', price: null, minQty: '', note: '' }), terms: () => '' };
+    const firstField = { categories: (i) => `#ws-cat-${i}-t`, products: (i) => `#ws-pr-${i}-name`, terms: (i) => `#ws-term-${i}`, photos: (i) => `#ws-ph-${i}-alt` };
+
+    view.addEventListener('input', (e) => {
+      const t = e.target;
+      const cnt = $(`[data-count-for="${t.id}"]`, view);
+      if (cnt) cnt.textContent = t.value.length;
+      if (t.id === 'ws-intro') w.intro = t.value;
+      else if (t.id === 'ws-closed') w.closedMessage = t.value;
+      else if (t.id === 'ws-note') w.priceNote = t.value;
+      else {
+        const at = itemOf(t);
+        if (!at || !t.hasAttribute('data-k')) return;
+        const k = t.getAttribute('data-k');
+        if (at.list === 'terms') w.terms[at.i] = t.value;
+        else if (k === 'price') {
+          const v = t.value.trim();
+          const n = parsePrice(v);
+          w.products[at.i].price = v === '' ? null : (n == null ? v : n);
+          fieldError(t, v === '' || n != null ? '' : 'Enter a price like 4.50, or leave it empty.');
+        } else {
+          w[at.list][at.i][k] = t.value;
+          if (at.list === 'products' && k === 'name') fieldError(t, '');
+        }
+      }
+      changed();
+    });
+    view.addEventListener('change', async (e) => {
+      const t = e.target;
+      if (t.id === 'ws-accepting') {
+        w.accepting = t.checked;
+        $('[data-acc-hint]', view).textContent = w.accepting ? 'The inquiry form is shown on the page.' : 'The inquiry form is hidden, and the message below is shown instead.';
+        changed();
+      } else if (t.id === 'ws-show-prices') {
+        w.showPrices = t.checked;
+        changed();
+      } else if (t.hasAttribute('data-k') && t.getAttribute('data-k') === 'price') {
+        const n = parsePrice(t.value);
+        if (n != null) t.value = priceInput(n);
+      } else if (t.hasAttribute('data-ws-photo-input')) {
+        const files = Array.from(t.files || []);
+        t.value = '';
+        if (!files.length) return;
+        const status = $('[data-ws-ph-status]', view);
+        const room = WS_LIMIT.photos - w.photos.length;
+        const todo = files.slice(0, room);
+        let added = 0, failed = '';
+        view.classList.add('is-busy');
+        for (let n = 0; n < todo.length; n++) {
+          status.textContent = todo.length > 1 ? `Preparing photo ${n + 1} of ${todo.length}…` : 'Preparing the photo…';
+          try {
+            const { full: big, thumb } = await preparePhoto(todo[n]);
+            status.textContent = todo.length > 1 ? `Uploading photo ${n + 1} of ${todo.length}…` : 'Uploading…';
+            const res = await state.backend.upload(big, thumb);
+            w.photos.push({ img: res.ref, alt: '' });
+            added++;
+          } catch (ex) {
+            failed = ex.code === 'signed_out' ? 'Your login ended. Log in again to upload.' : (ex.message || 'A photo couldn’t be uploaded.');
+            if (ex.code === 'signed_out') break;
+          }
+        }
+        view.classList.remove('is-busy');
+        const skipped = files.length - todo.length;
+        const msg = [
+          added ? `${plural(added, 'photo')} added. Add a short description to each, then publish.` : '',
+          failed,
+          skipped ? `${plural(skipped, 'photo')} skipped (the limit is ${WS_LIMIT.photos}).` : '',
+        ].filter(Boolean).join(' ');
+        if (added) {
+          changed({ rerender: true, focus: firstField.photos(w.photos.length - added) });
+          const st = $('#admin-main [data-ws-ph-status]');
+          if (st) st.textContent = msg;
+        } else status.textContent = msg;
+      }
+    });
+    view.addEventListener('click', async (e) => {
+      const b = e.target.closest('button[data-act]');
+      if (!b) return;
+      const act = b.getAttribute('data-act');
+      if (act === 'add') {
+        const list = b.getAttribute('data-list');
+        if (full(list)) return;
+        w[list].push(blank[list]());
+        changed({ rerender: true, focus: firstField[list](w[list].length - 1) });
+        return;
+      }
+      const at = itemOf(b);
+      if (!at) return;
+      const arr = w[at.list];
+      if (act === 'del') {
+        const snap = clone(state.draft);
+        const what = { categories: 'box', products: 'product', terms: 'point', photos: 'photo' }[at.list];
+        const entry = arr[at.i];
+        const label = at.list === 'products' ? entry.name : at.list === 'categories' ? entry.title : '';
+        arr.splice(at.i, 1);
+        const next = arr.length ? firstField[at.list](Math.min(at.i, arr.length - 1)) : `[data-act="add"][data-list="${at.list}"]`;
+        changed({ rerender: true, focus: at.list === 'photos' && !arr.length ? '#ws-ph-title' : next });
+        toastUndo(`Removed ${label ? `“${label}”` : `the ${what}`}.`, snap);
+      } else if (act === 'up' || act === 'down') {
+        const to = act === 'up' ? at.i - 1 : at.i + 1;
+        if (to < 0 || to >= arr.length) return;
+        [arr[at.i], arr[to]] = [arr[to], arr[at.i]];
+        const edge = act === 'up' ? to === 0 : to === arr.length - 1;
+        const keep = edge ? (act === 'up' ? 'down' : 'up') : act;
+        changed({ rerender: true, focus: `[data-list="${at.list}"][data-i="${to}"] [data-act="${keep}"]` });
       }
     });
   }

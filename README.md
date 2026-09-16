@@ -63,8 +63,10 @@ It answers from this site's menu (`menu-data.js`), hours and ordering rules
 ## Admin panel
 
 `admin.html` is the door to the admin panel, where you change prices, items,
-photos, hours, closed days, the announcement bar, delivery rules and farmers
-markets without touching any files.
+photos, hours, closed days, the announcement bar, delivery rules, farmers
+markets and the Wholesale page (intro, what you supply, price list, how it
+works, photos, and whether you're taking new accounts) without touching any
+files.
 
 - **On your computer:** double-click `admin.html` for test mode (username
   `admin`, passcode `1234`). Changes save only in that browser and show on

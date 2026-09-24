@@ -961,6 +961,11 @@ body.has-action-bar .site-footer { padding-bottom: 72px; }
 .modal__context { font-size: .76rem; letter-spacing: .14em; text-transform: uppercase; color: var(--orange-ink); font-weight: 500; }
 .modal__close { flex: none; }
 .modal__img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; background: var(--pink-wash); }
+.modal__thumbs { display: flex; gap: 8px; padding: 10px 24px 0; overflow-x: auto; }
+.modal__thumb { flex: none; padding: 0; border: 2px solid transparent; border-radius: 10px; background: none; cursor: pointer; line-height: 0; }
+.modal__thumb img { width: 56px; height: 56px; object-fit: cover; border-radius: 8px; }
+.modal__thumb[aria-pressed="true"] { border-color: var(--pink-ink); }
+.modal__thumb:focus-visible { outline-offset: 2px; }
 .modal__title { font-size: clamp(1.6rem, 4vw, 2rem); margin: 0; }
 .modal__title:focus { outline: none; }
 .modal__price { margin: -8px 0 0; font-size: 1.15rem; color: var(--ink); }
@@ -1003,6 +1008,7 @@ body.has-action-bar .site-footer { padding-bottom: 72px; }
   .modal__panel { width: 100%; max-height: 92vh; border-radius: 22px 22px 0 0; animation: sheet .3s var(--ease); }
   @keyframes sheet { from { transform: translateY(40%); opacity: .4; } }
   .modal__inner { padding: 20px 16px 8px; }
+  .modal__thumbs { padding: 10px 16px 0; }
   .modal__head { padding: 6px 6px 6px 16px; }
   .modal__foot { padding: 12px 16px calc(14px + env(safe-area-inset-bottom)); }
   .modal__add { font-size: .78rem; padding-inline: 14px; }
@@ -1212,3 +1218,14 @@ html.a11y-contrast-mono { filter: grayscale(1); }
 @media print {
   .a11y-fab, .a11y-panel, .a11y-player, .a11y-guide, .a11y-mask { display: none !important; }
 }
+
+/* Preview of unpublished changes (opened from the admin panel) */
+.preview-bar { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 9999; display: flex; align-items: center; gap: 12px;
+  max-width: calc(100% - 24px); padding: 10px 12px 10px 18px; border-radius: 999px; background: var(--ink); color: #fff; box-shadow: var(--shadow-lg); font-size: .95rem; }
+.preview-bar strong { font-weight: 600; }
+.preview-bar button { border: 0; border-radius: 999px; padding: 8px 14px; background: var(--pink); color: var(--ink); font: inherit; font-weight: 500; cursor: pointer; white-space: nowrap; }
+.preview-bar button:focus-visible { outline: 3px solid #fff; outline-offset: 2px; }
+/* Closed days and special hours coming up (contact page) */
+.hours-special { margin-top: 18px; }
+.hours-special h4 { font-size: 1rem; margin: 0 0 6px; }
+.hours-special small { display: block; color: var(--muted); font-size: .85em; }

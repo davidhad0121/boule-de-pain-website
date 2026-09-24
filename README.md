@@ -47,14 +47,15 @@ connected in `assets/js/site-config.js`:
 "chatbot": { "workerUrl": "https://bouledepain-chatbot.bouledepain.workers.dev" }
 ```
 
-It answers from this site's menu (`menu-data.js`), hours and ordering rules
-(`site-config.js`) and main pages.
+It answers from this site's menu, hours, ordering rules and main pages.
 
-- **Once the site is online** at bouledepain.com, the bot reads it directly,
-  so its answers follow your changes within about 10 minutes.
-- **Until then** (and when you open the files on your computer), it uses a
-  saved copy of the site. After changing the menu, hours or pages,
-  double-click `Update chatbot.command` in the chatbot folder.
+- **Menu, prices, sold out, hours, closed days and the announcement** come
+  straight from the admin panel: the bot knows about a publish within about a
+  minute.
+- **Page text:** once the site is online at bouledepain.com, the bot reads the
+  pages directly (changes show within about 10 minutes). Until then it uses a
+  saved copy of the site: after changing page text, double-click
+  `Update chatbot.command` in the chatbot folder.
 - **Another address:** if you put the site on another address first (like a
   Netlify, Vercel or GitHub Pages link), add that address to the bot's
   `ALLOWED_ORIGINS` setting (see the chatbot folder's `README.md`).
@@ -62,24 +63,27 @@ It answers from this site's menu (`menu-data.js`), hours and ordering rules
 
 ## Admin panel
 
-`admin.html` is the door to the admin panel, where you change prices, items,
-photos, hours, closed days, the announcement bar, delivery rules, farmers
-markets and the Wholesale page (intro, what you supply, price list, how it
-works, photos, and whether you're taking new accounts) without touching any
-files.
+`admin.html` is the door to the admin panel
+(https://bouledepain-admin.bouledepain.workers.dev/admin), where you change
+prices, items, photos, what's sold out, hours, closed days, special hours, the
+announcement bar, delivery rules, farmers markets and the Wholesale page
+without touching any files.
 
-- **On your computer:** double-click `admin.html` for test mode (username
-  `admin`, passcode `1234`). Changes save only in that browser and show on
-  this copy of the site.
-- **Live:** follow the guide in the `boule-de-pain-admin` folder, then paste
-  the panel's address into `assets/js/site-config.js`:
-
-  ```
-  "admin": { "url": "https://bouledepain-admin.YOUR-NAME.workers.dev" }
-  ```
-
-  The site then reads published changes from the panel (`assets/js/live-data.js`).
-  If the panel can't be reached, the site falls back to its own files.
+- **Published changes show right away:** every page asks the panel for the
+  latest published version when it opens (`assets/js/live-data.js`). If the
+  panel can't be reached, the site uses its own files.
+- **The files follow too:** a GitHub Action (`.github/workflows/bake.yml`,
+  every 15 minutes) copies each publish into `assets/js/site-config.js` and
+  `assets/js/menu-data.js` and commits them. You can also run it by hand in
+  GitHub under **Actions → Copy admin panel changes into the files → Run
+  workflow**, or on your computer with `node tools/bake.mjs`. Because GitHub
+  adds these commits itself, pull (`git pull`) before you change files on your
+  computer.
+- **On your computer:** double-click `admin.html` and choose test mode
+  (owner: `admin` / `1234`, staff: `staff` / `1234`). Changes save only in
+  that browser and show on this copy of the site.
+- **Preview links** (`?preview=…` on any page) show unpublished changes from
+  the panel for 3 hours, with a bar at the top of the page.
 
 ## Accessibility
 
@@ -94,8 +98,9 @@ new pages using the same headings, labels and colors.
 
 | What | File |
 | --- | --- |
-| Hours, phone numbers, email, delivery rules, holiday closures | `assets/js/site-config.js` |
-| Menu items, prices, sizes, extras, photos, advance notice | `assets/js/menu-data.js` |
+| Menu, prices, sold out, photos, hours, closed days, special hours, announcement, delivery rules, markets, wholesale | the admin panel (its changes are copied into the two files below) |
+| Phone numbers, email, address, social links, forms, gift card amounts | `assets/js/site-config.js` |
+| The menu as a file (kept in step with the panel) | `assets/js/menu-data.js` |
 | Page text and images | the `.html` files |
 | Colors and fonts | `assets/css/styles.css` (top of the file) |
 | Chatbot connection | `assets/js/site-config.js` (`chatbot` → `workerUrl`) |
@@ -105,6 +110,6 @@ new pages using the same headings, labels and colors.
 Hours, the cutoff time, delivery days and market days in the page text all
 update from these files (and from the admin panel) when the page loads.
 
-To add a holiday closure, add the date to `closedDates`, like
-`"closedDates": ["2026-12-25"]`. The open/closed sign and the order dates will
-follow it.
+Closed days and special hours are set in the admin panel (**Hours & closed
+days**). The open/closed sign, the contact page and the order dates follow
+them.

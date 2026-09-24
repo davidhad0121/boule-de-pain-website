@@ -1,12 +1,15 @@
 /* Boule de Pain — admin panel
-   Edit the menu (prices, sizes, extras, photos, sold out / hidden), store hours and closed dates,
-   the announcement bar, ordering rules, farmers markets and the wholesale page, then publish. Every publish is kept
-   in a history you can restore.
+   Edit the menu (prices, sizes, extras, photos, sold out / sold out today / hidden), store hours, closed days and
+   special hours, the announcement bar, ordering rules, farmers markets and the wholesale page, preview it all on
+   the real website, then publish. Every publish is kept in a history you can restore, with what changed and who.
+   The owner can add staff logins that can only change what's sold out, closed days / special hours and the
+   announcement.
 
    It runs in two places:
    - On the Cloudflare worker (data-mode="server"): real logins, changes go live on the website.
    - As admin.html in the website folder (data-mode="site"): on your own computer it is a test mode
-     (log in with admin / 1234) that saves only in this browser. On a web server it links to the live panel. */
+     (log in with admin / 1234, or staff / 1234 to see what staff can do) that saves only in this browser.
+     On a web server it links to the live panel. */
 (() => {
   'use strict';
 
@@ -16,6 +19,7 @@
   const IS_LOCAL = location.protocol === 'file:' || /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
   const TEST_USER = 'admin';
   const TEST_PASS = '1234';
+  const TEST_USERS = { admin: { pass: '1234', role: 'owner' }, staff: { pass: '1234', role: 'staff' } };
   const WIX = 'https://static.wixstatic.com/media/';
   const LOGO = '37ffc0_f74025ac4b024bfe8b029d1934f61fe7~mv2.png';
   const DAY = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -81,6 +85,26 @@
     const p = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
     return p; // YYYY-MM-DD
   }
+  const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || '')) && !Number.isNaN(Date.parse(`${s}T00:00:00Z`));
+  function addDaysIso(iso, n) { return new Date(Date.parse(`${iso}T00:00:00Z`) + n * 864e5).toISOString().slice(0, 10); }
+  function daysApart(a, b) { return Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 864e5); }
+  /* "Thu, Dec 24" or "Thu, Dec 24 – Sat, Dec 26" (with the year when it isn't this year). */
+  function fmtRange(x) {
+    const short = (iso) => {
+      const [y, m, d] = iso.split('-').map(Number);
+      return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric' }) +
+        (y !== Number(todayLA().slice(0, 4)) ? `, ${y}` : '');
+    };
+    return x.to && x.to !== x.date ? `${short(x.date)} – ${short(x.to)}` : short(x.date);
+  }
+  /* Links allowed in the announcement bar: a page of the website, or an https:// address. */
+  const SITE_PAGES = [['order.html', 'Order online'], ['catering.html', 'Catering'], ['wholesale.html', 'Wholesale'],
+    ['farmers-market.html', 'Farmers markets'], ['gift-card.html', 'Gift cards'], ['contact.html', 'Contact & hours'], ['index.html', 'Home page']];
+  function safeLink(url) {
+    const s = String(url || '').trim();
+    if (/^[a-z0-9-]+\.html(#[a-z0-9-]{1,40})?$/.test(s)) return s;
+    try { const u = new URL(s); return u.protocol === 'https:' && !u.username && !u.password ? u.href : ''; } catch (e) { return ''; }
+  }
   const ICONS = {
     plus: '<path d="M12 5v14M5 12h14"/>',
     up: '<path d="M12 19V5M6 11l6-6 6 6"/>',
@@ -107,6 +131,11 @@
     left: '<path d="M19 12H5M11 6l-6 6 6 6"/>',
     right: '<path d="M5 12h14M13 6l6 6-6 6"/>',
     copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/>',
+    grip: '<circle cx="9" cy="6" r="1.2"/><circle cx="15" cy="6" r="1.2"/><circle cx="9" cy="12" r="1.2"/><circle cx="15" cy="12" r="1.2"/><circle cx="9" cy="18" r="1.2"/><circle cx="15" cy="18" r="1.2"/>',
+    percent: '<path d="M19 5L5 19"/><circle cx="7" cy="7" r="2.3"/><circle cx="17" cy="17" r="2.3"/>',
+    user: '<circle cx="12" cy="8" r="3.8"/><path d="M4.5 20c.8-3.8 3.9-6 7.5-6s6.7 2.2 7.5 6"/>',
+    star: '<path d="M12 4l2.4 5 5.3.7-3.9 3.7 1 5.3L12 16.2 7.2 18.7l1-5.3-3.9-3.7 5.3-.7z"/>',
+    more: '<circle cx="5.5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="18.5" cy="12" r="1.2"/>',
   };
   const icon = (name) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${ICONS[name] || ''}</svg>`;
 
@@ -126,9 +155,22 @@
   }
   function itemAt(d, p) { return sectionsOf(d.menu.categories[p.ci])[p.gi].items[p.ii]; }
   function listAt(d, ci, gi) { return sectionsOf(d.menu.categories[ci])[gi].items; }
+  /* on | today (sold out today, back tomorrow by itself) | soldout (until changed) | hidden */
+  function availOf(it) {
+    if (it.hidden) return 'hidden';
+    if (it.soldOut) return 'soldout';
+    if (it.soldToday && it.soldToday === todayLA()) return 'today';
+    return 'on';
+  }
+  function setAvail(it, v) {
+    delete it.hidden; delete it.soldOut; delete it.soldToday;
+    if (v === 'hidden') it.hidden = true;
+    else if (v === 'soldout') it.soldOut = true;
+    else if (v === 'today') it.soldToday = todayLA();
+  }
   function countItems(d) {
     const c = { items: 0, hidden: 0, soldOut: 0 };
-    eachItem(d, (it) => { c.items++; if (it.hidden) c.hidden++; if (it.soldOut) c.soldOut++; });
+    eachItem(d, (it) => { c.items++; const a = availOf(it); if (a === 'hidden') c.hidden++; if (a === 'soldout' || a === 'today') c.soldOut++; });
     return c;
   }
   function groupUsage(d, gid) {
@@ -163,13 +205,17 @@
           const h = (S.hours || []).find((x) => x.day === d) || {};
           return { day: d, open: h.open || '', close: h.close || '' };
         }),
-        closures: (S.closedDates || []).map((date) => ({ date, note: '' })),
+        closures: Array.isArray(S.closures) ? S.closures : (S.closedDates || []).map((date) => ({ date, note: (S.closureNotes || {})[date] || '' })),
+        special: Array.isArray(S.special) ? S.special : [],
         ordering: {
           cutoff: o.cutoff || '15:00', leadDays: o.leadDays == null ? 1 : o.leadDays, deliveryDays: o.deliveryDays || [1, 2, 3, 4, 5],
           maxDaysAhead: o.maxDaysAhead || 42, windowMinutes: o.windowMinutes || 180,
         },
         markets: (S.markets || []).map((m) => ({ day: m.day, locations: m.locations.slice() })),
         wholesale: S.wholesale && typeof S.wholesale === 'object' ? S.wholesale : WS_DEFAULT,
+        ...(S.announceLink && S.announceLink.url ? { announceLink: S.announceLink } : {}),
+        ...(S.announceFrom ? { announceFrom: S.announceFrom } : {}),
+        ...(S.announceTo ? { announceTo: S.announceTo } : {}),
       },
       menu: { addonGroups: M.addonGroups || {}, categories: M.categories || [] },
     });
@@ -179,8 +225,19 @@
   function normalize(d) {
     const trim = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
     d.site.announcement = trim(d.site.announcement);
-    d.site.closures = (d.site.closures || []).filter((c) => c.date).map((c) => ({ date: c.date, note: trim(c.note) }))
-      .sort((a, b) => (a.date < b.date ? -1 : 1));
+    const link = d.site.announceLink;
+    if (link && trim(link.url)) d.site.announceLink = { url: trim(link.url), text: trim(link.text) || 'Learn more' };
+    else delete d.site.announceLink;
+    ['announceFrom', 'announceTo'].forEach((k) => { if (!d.site[k]) delete d.site[k]; });
+    const range = (x) => {
+      const r = { date: x.date };
+      if (x.to && x.to !== x.date) r.to = x.to;
+      return r;
+    };
+    d.site.closures = (d.site.closures || []).filter((c) => c && c.date).map((c) => Object.assign(range(c), { note: trim(c.note) }))
+      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+    d.site.special = (d.site.special || []).filter((x) => x && x.date).map((x) => Object.assign(range(x), { open: x.open || '', close: x.close || '', note: trim(x.note) }))
+      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
     d.site.markets.forEach((m) => { m.locations = m.locations.map(trim).filter(Boolean); });
     d.site.wholesale = normalizeWholesale(d.site.wholesale, trim);
     Object.values(d.menu.addonGroups).forEach((g) => {
@@ -207,8 +264,14 @@
           }
           if (it.labels && it.labels.length) it.spice = it.labels[0]; else { delete it.labels; delete it.spice; }
           ['popular', 'hidden', 'soldOut'].forEach((k) => { if (!it[k]) delete it[k]; });
+          if (it.soldOut || !it.soldToday || it.soldToday < todayLA()) delete it.soldToday;
           if (!it.notice) delete it.notice;
-          if (!it.img) delete it.img;
+          if (!it.img) { delete it.img; delete it.alt; delete it.more; }
+          if (it.alt != null) { it.alt = trim(it.alt); if (!it.alt) delete it.alt; }
+          if (it.more) {
+            it.more = it.more.filter((p) => p && p.img).slice(0, 5).map((p) => (trim(p.alt) ? { img: p.img, alt: trim(p.alt) } : { img: p.img }));
+            if (!it.more.length) delete it.more;
+          }
           if (it.addons && !it.addons.length) delete it.addons;
         });
       });
@@ -299,6 +362,18 @@
       if (!m.locations.some((l) => String(l).trim())) add(`${DAY[m.day]} markets need at least one market name.`, { tab: 'markets' });
     });
     if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(d.site.ordering.cutoff || '')) add('The order cutoff needs a time.', { tab: 'ordering' });
+    (d.site.closures || []).forEach((c) => {
+      if (c.to && c.to < c.date) add(`The closed days starting ${fmtRange({ date: c.date })} end before they start.`, { tab: 'hours' });
+      else if (c.to && daysApart(c.date, c.to) > 62) add(`The closed days starting ${fmtRange({ date: c.date })} are longer than two months.`, { tab: 'hours' });
+    });
+    (d.site.special || []).forEach((x) => {
+      if (!x.open || !x.close) add(`Special hours on ${fmtRange(x)} need an opening and a closing time.`, { tab: 'hours' });
+      else if (x.close <= x.open) add(`Special hours on ${fmtRange(x)} must close after they open.`, { tab: 'hours' });
+      if (x.to && x.to < x.date) add(`Special hours starting ${fmtRange({ date: x.date })} end before they start.`, { tab: 'hours' });
+    });
+    const al = d.site.announceLink;
+    if (al && al.url && !safeLink(al.url)) add('The announcement link needs to be a page of the website or start with https://', { tab: 'ordering', sel: '#ann-url' });
+    if (d.site.announceFrom && d.site.announceTo && d.site.announceTo < d.site.announceFrom) add('The announcement ends before it starts.', { tab: 'ordering', sel: '#ann-to' });
     const ws = d.site.wholesale;
     if (ws) {
       const go = (sel) => ({ tab: 'wholesale', sel });
@@ -338,9 +413,11 @@
       const o = a.get(k).it, n = v.it;
       if (priceText(o) !== priceText(n)) lines.push(`${n.name}: ${priceText(o)} → ${priceText(n)}`);
       if (o.name !== n.name) lines.push(`Renamed “${o.name}” to “${n.name}”`);
-      if (!!o.soldOut !== !!n.soldOut) lines.push(`${n.name}: ${n.soldOut ? 'sold out' : 'available again'}`);
+      const av = (x) => (x.hidden ? '' : x.soldOut ? 'sold out' : x.soldToday && x.soldToday >= todayLA() ? 'sold out today' : 'available');
+      if (av(o) !== av(n) && !o.hidden && !n.hidden) lines.push(`${n.name}: ${av(n) === 'available' ? 'available again' : av(n)}`);
       if (!!o.hidden !== !!n.hidden) lines.push(`${n.name}: ${n.hidden ? 'hidden from the menu' : 'back on the menu'}`);
       if ((o.img || '') !== (n.img || '')) lines.push(`${n.name}: ${n.img ? 'new photo' : 'photo removed'}`);
+      else if (!same(o.more || [], n.more || []) || (o.alt || '') !== (n.alt || '')) lines.push(`${n.name}: photos updated`);
       const rest = (x) => JSON.stringify([x.desc || '', x.addons || [], x.labels || [], !!x.popular, x.notice || 0]);
       if (rest(o) !== rest(n)) lines.push(`${n.name}: details updated`);
       if (a.get(k).cat.id !== v.cat.id) lines.push(`Moved “${n.name}” to ${v.cat.name}`);
@@ -352,8 +429,11 @@
     }
     if (!same(before.menu.addonGroups, after.menu.addonGroups)) lines.push('Extras changed');
     if (!same(before.site.hours, after.site.hours)) lines.push('Store hours changed');
-    if (!same(before.site.closures, after.site.closures)) lines.push('Closed dates changed');
+    if (!same(before.site.closures || [], after.site.closures || [])) lines.push('Closed days changed');
+    if (!same(before.site.special || [], after.site.special || [])) lines.push('Special hours changed');
     if (before.site.announcement !== after.site.announcement) lines.push(after.site.announcement ? 'Announcement updated' : 'Announcement bar turned off');
+    else if (!same(before.site.announceLink || null, after.site.announceLink || null)) lines.push('Announcement link changed');
+    if ((before.site.announceFrom || '') !== (after.site.announceFrom || '') || (before.site.announceTo || '') !== (after.site.announceTo || '')) lines.push('Announcement dates changed');
     if (!same(before.site.ordering, after.site.ordering)) lines.push('Ordering rules changed');
     if (!same(before.site.markets, after.site.markets)) lines.push('Farmers markets changed');
     const wb = before.site.wholesale || {}, wa = after.site.wholesale || {};
@@ -410,6 +490,11 @@
     getVersion: (v) => request('GET', `/api/history/${encodeURIComponent(v)}`),
     restore: (v) => request('POST', '/api/restore', { version: v }),
     activity: () => request('GET', '/api/activity'),
+    preview: (d) => request('POST', '/api/preview', { doc: d }),
+    users: async () => (await request('GET', '/api/users')).users,
+    saveUser: (name, password) => request('POST', '/api/users', { name, password }),
+    removeUser: (name) => request('DELETE', `/api/users/${encodeURIComponent(name)}`),
+    changePassword: (current, next) => request('POST', '/api/password', { current, next }),
     upload(full, thumb) {
       const fd = new FormData();
       fd.append('full', full, 'photo');
@@ -456,9 +541,11 @@
     urls: new Map(),
     data() { return store.get(TEST_KEY, null); },
     async session() {
-      let ok = false;
-      try { ok = sessionStorage.getItem(TEST_SESSION) === '1'; } catch (e) { /* ignore */ }
-      return { authenticated: ok, user: ok ? TEST_USER : null, siteUrl: 'index.html', setup: null };
+      let user = '';
+      try { user = sessionStorage.getItem(TEST_SESSION) || ''; } catch (e) { /* ignore */ }
+      if (user === '1') user = TEST_USER;
+      const ok = !!TEST_USERS[user];
+      return { authenticated: ok, user: ok ? user : null, role: ok ? TEST_USERS[user].role : null, siteUrl: 'index.html', setup: null };
     },
     async login(username, password) {
       const now = Date.now();
@@ -466,9 +553,10 @@
       if (lock.until > now) {
         throw new ApiError(429, 'locked', 'Too many wrong tries. Please wait and try again.', { retryAfter: Math.ceil((lock.until - now) / 1000) });
       }
-      if (String(username).trim().toLowerCase() === TEST_USER && password === TEST_PASS) {
+      const name = String(username).trim().toLowerCase();
+      if (TEST_USERS[name] && password === TEST_USERS[name].pass) {
         store.del(TEST_LOCK);
-        try { sessionStorage.setItem(TEST_SESSION, '1'); } catch (e) { /* ignore */ }
+        try { sessionStorage.setItem(TEST_SESSION, name); } catch (e) { /* ignore */ }
         return { ok: true };
       }
       lock.fails = (lock.fails || 0) + 1;
@@ -498,7 +586,7 @@
       const now = Date.now();
       const version = (d.version || 0) + 1;
       const saved = normalize(clone(docIn));
-      const history = [{ version, savedAt: now, note: note || '', doc: saved }].concat(d.history || []).slice(0, 8);
+      const history = [{ version, savedAt: now, note: note || '', by: state.user || '', doc: saved }].concat(d.history || []).slice(0, 8);
       const next = { version, savedAt: now, doc: saved, history, preview: d.preview !== false };
       try { store.set(TEST_KEY, next); } catch (e) {
         try { next.history = next.history.slice(0, 2); store.set(TEST_KEY, next); } catch (e2) {
@@ -509,7 +597,7 @@
     },
     async history() {
       const d = this.data();
-      return d ? (d.history || []).map((h) => ({ version: h.version, savedAt: h.savedAt, note: h.note })) : [];
+      return d ? (d.history || []).map((h) => ({ version: h.version, savedAt: h.savedAt, note: h.note, by: h.by || '' })) : [];
     },
     async getVersion(v) {
       const d = this.data();
@@ -523,6 +611,16 @@
       return this.save(h.doc, d ? d.version : 0, `Restored version ${v}`);
     },
     async activity() { return { events: [], sessions: [] }; },
+    async preview(d) {
+      if (!store.trySet('bdp-admin-preview', { savedAt: Date.now(), doc: normalize(clone(d)) })) {
+        throw new ApiError(507, 'full', 'This browser’s storage for test mode is full. Reset the test data (Login & security) and try again.');
+      }
+      return { token: 'local' };
+    },
+    async users() { return []; },
+    async saveUser() { throw new ApiError(400, 'test', 'Staff logins are made in the live admin panel. In test mode, log in as staff / 1234 to see what staff can do.'); },
+    async removeUser() { return { ok: true }; },
+    async changePassword() { throw new ApiError(400, 'test', 'Passcodes are changed in the live admin panel. Test mode always uses 1234.'); },
     async upload(full, thumb) {
       const id = randomId(18);
       try { await idb.put(id, { full, thumb, at: Date.now() }); } catch (e) {
@@ -536,7 +634,9 @@
     async preload(docs) {
       const ids = new Set();
       docs.filter(Boolean).forEach((d) => {
-        eachItem(d, (it) => { if (it.img && it.img.startsWith('upload:')) ids.add(it.img.slice(7)); });
+        eachItem(d, (it) => {
+          [it.img].concat((it.more || []).map((p) => p && p.img)).forEach((ref) => { if (ref && String(ref).startsWith('upload:')) ids.add(ref.slice(7)); });
+        });
         ((d.site && d.site.wholesale && d.site.wholesale.photos) || []).forEach((ph) => {
           if (ph && String(ph.img || '').startsWith('upload:')) ids.add(ph.img.slice(7));
         });
@@ -554,6 +654,7 @@
     },
     async reset() {
       store.del(TEST_KEY);
+      store.del('bdp-admin-preview');
       try { await idb.clear(); } catch (e) { /* ignore */ }
     },
     previewOn() { const d = this.data(); return !d || d.preview !== false; },
@@ -625,6 +726,7 @@
   const state = {
     backend: null,
     user: '',
+    role: 'owner',
     siteUrl: '',
     published: null, // { version, savedAt, doc }
     original: null,
@@ -633,9 +735,10 @@
     search: '',
     filter: 'all',
     collapsed: {},
+    openItem: null, // phones: the menu item whose move/delete buttons are showing
     lastActivity: Date.now(),
   };
-  const DRAFT_KEY = `bdp-admin-draft-v1:${IS_SERVER ? location.host : 'test'}`;
+  const DRAFT_KEY = () => `bdp-admin-draft-v2:${IS_SERVER ? location.host : 'test'}:${state.user || ''}`;
   const TABS = [
     ['menu', 'Menu', 'menu'],
     ['extras', 'Extras', 'tag'],
@@ -644,8 +747,12 @@
     ['markets', 'Farmers markets', 'market'],
     ['wholesale', 'Wholesale', 'truck'],
     ['history', 'History & backup', 'history'],
-    ['security', 'Login & security', 'lock'],
+    ['security', 'Logins & security', 'lock'],
   ];
+  /* Staff logins can change what's sold out, closed days and special hours, and the announcement. */
+  const STAFF_TABS = ['menu', 'hours', 'ordering', 'security'];
+  const isOwner = () => state.role !== 'staff';
+  const tabsFor = () => TABS.filter(([k]) => isOwner() || STAFF_TABS.includes(k));
 
   function canon(v) {
     if (Array.isArray(v)) return `[${v.map(canon).join(',')}]`;
@@ -783,8 +890,8 @@
     state.lastActivity = Date.now();
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
-      if (isDirty()) store.trySet(DRAFT_KEY, { base: state.published.version, savedAt: Date.now(), doc: state.draft });
-      else store.del(DRAFT_KEY);
+      if (isDirty()) store.trySet(DRAFT_KEY(), { base: state.published.version, savedAt: Date.now(), doc: state.draft });
+      else store.del(DRAFT_KEY());
     }, 350);
     if (opts && opts.rerender) renderTab(opts.focus);
     refreshStatus();
@@ -796,18 +903,19 @@
       const el = $('[data-status]');
       if (!el || !state.published) return;
       const dirty = isDirty();
-      const pub = $('[data-act="publish"]'), disc = $('[data-act="discard"]');
-      if (pub) { pub.disabled = !dirty; pub.classList.toggle('is-ready', dirty); }
-      if (disc) disc.hidden = !dirty;
+      $$('[data-act="publish"]').forEach((b) => { b.disabled = !dirty; b.classList.toggle('is-ready', dirty); });
+      $$('[data-act="discard"]').forEach((b) => { b.hidden = !dirty; });
       root.classList.toggle('is-dirty', dirty);
+      let html;
       if (dirty) {
         const n = describeChanges(normalized(state.published.doc), normalized(state.draft)).length || 1;
-        el.innerHTML = `<span class="dot dot--warn" aria-hidden="true"></span>${plural(n, 'change')} not published yet`;
+        html = `<span class="dot dot--warn" aria-hidden="true"></span>${plural(n, 'change')} not published yet`;
       } else if (state.published.version) {
-        el.innerHTML = `<span class="dot dot--ok" aria-hidden="true"></span>Published · ${esc(fmtStamp(state.published.savedAt))}`;
+        html = `<span class="dot dot--ok" aria-hidden="true"></span>Published · ${esc(fmtStamp(state.published.savedAt))}`;
       } else {
-        el.innerHTML = '<span class="dot" aria-hidden="true"></span>No changes published yet';
+        html = '<span class="dot" aria-hidden="true"></span>No changes published yet';
       }
+      $$('[data-status]').forEach((x) => { x.innerHTML = html; });
     });
   }
   window.addEventListener('beforeunload', (e) => {
@@ -865,7 +973,7 @@
       '<main class="login" id="admin-main" tabindex="-1">' +
       `<form class="card login__card" novalidate autocomplete="on">${logoImg(64)}` +
       '<h1 tabindex="-1">Boule de Pain admin</h1>' +
-      (test ? `<div class="note note--test"><strong>Test mode.</strong> Log in with username <code>${TEST_USER}</code> and passcode <code>${TEST_PASS}</code>. Changes are saved only in this browser and show on this copy of the website.</div>` : '') +
+      (test ? `<div class="note note--test"><strong>Test mode.</strong> Log in with username <code>${TEST_USER}</code> and passcode <code>${TEST_PASS}</code> (or <code>staff</code> / <code>${TEST_PASS}</code> to see what staff can do). Changes are saved only in this browser and show on this copy of the website.</div>` : '') +
       (setupMsg ? `<div class="note note--warn" role="alert">${esc(setupMsg)}</div>` : '') +
       '<div class="field"><label for="lg-user">Username</label>' +
         '<input class="input" id="lg-user" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="100"></div>' +
@@ -874,7 +982,7 @@
         '<button type="button" class="btn btn--quiet btn--sm" data-act="toggle-pass" aria-pressed="false" aria-controls="lg-pass">Show</button></div></div>' +
       '<p class="form-error" data-login-error role="alert" hidden></p>' +
       `<button class="btn btn--primary btn--block" type="submit"${setupMsg ? ' disabled' : ''}>Log in</button>` +
-      (test ? '' : '<p class="muted small">Too many wrong tries lock the login for a while. Forgot the passcode? Double-click “Set admin passcode” to set a new one.</p>') +
+      (test ? '' : '<p class="muted small">Too many wrong tries lock the login for a while (devices that logged in before aren’t affected by other people’s tries). Forgot your passcode? The owner can give staff a new one in Logins &amp; security; the owner’s own passcode is reset by whoever manages the website.</p>') +
       (info.message ? `<p class="note">${esc(info.message)}</p>` : '') +
       '</form></main>';
     const form = $('form', app());
@@ -904,6 +1012,7 @@
         if (ex.code === 'locked' && ex.extra.retryAfter) {
           const mins = Math.ceil(ex.extra.retryAfter / 60);
           msg = ex.extra.retryAfter < 60 ? `Too many wrong tries. Try again in ${ex.extra.retryAfter} seconds.` : `Too many wrong tries. Try again in ${plural(mins, 'minute')}.`;
+          if (ex.extra.known === false) msg += ' A device you’ve logged in with before can still log in.';
         } else if (ex.code === 'invalid' && ex.extra.remaining != null && ex.extra.remaining <= 2) {
           msg += ` ${plural(ex.extra.remaining, 'try', 'tries')} left before the login locks for a while.`;
         }
@@ -919,6 +1028,7 @@
   }
 
   async function startApp() {
+    if (!tabsFor().some(([k]) => k === state.tab)) state.tab = 'menu';
     const loaded = await state.backend.load();
     withWholesale(loaded.doc);
     state.published = { version: loaded.version, savedAt: loaded.savedAt, doc: loaded.doc };
@@ -926,7 +1036,7 @@
     state.draft = clone(loaded.doc);
     await state.backend.preload([loaded.doc]);
     let restoredNote = '';
-    const saved = store.get(DRAFT_KEY, null);
+    const saved = store.get(DRAFT_KEY(), null);
     if (saved && saved.doc) {
       if (canon(normalized(saved.doc)) !== canon(normalized(loaded.doc))) {
         state.draft = withWholesale(saved.doc);
@@ -935,7 +1045,7 @@
           ? 'We brought back changes you hadn’t published yet.'
           : 'We brought back changes you hadn’t published. The website was updated since then, so check them before publishing.';
       } else {
-        store.del(DRAFT_KEY);
+        store.del(DRAFT_KEY());
       }
     }
     renderShell();
@@ -954,25 +1064,35 @@
     app().innerHTML =
       '<div class="shell">' +
       '<header class="topbar">' +
-        `<div class="topbar__brand">${logoImg(36)}<span><strong>Boule de Pain</strong><small>${test ? 'Admin · test mode' : 'Admin'}</small></span></div>` +
+        `<div class="topbar__brand">${logoImg(36)}<span><strong>Boule de Pain</strong><small>${test ? 'Admin · test mode' : isOwner() ? 'Admin' : 'Staff'}${state.user && state.user !== 'admin' ? ` · ${esc(state.user)}` : ''}</small></span></div>` +
         '<p class="topbar__status" data-status role="status" aria-live="polite"></p>' +
         '<div class="topbar__actions">' +
           '<button type="button" class="btn btn--quiet" data-act="discard" hidden>Discard changes</button>' +
+          `<button type="button" class="btn btn--quiet" data-act="preview" title="See your changes on the website before publishing">${icon('eye')}<span class="btn__label">Preview</span></button>` +
           '<button type="button" class="btn btn--primary" data-act="publish" disabled>Publish changes</button>' +
-          (site ? `<a class="btn btn--quiet" href="${esc(site)}" target="_blank" rel="noopener">View website${icon('external')}<span class="sr-only"> (opens in a new tab)</span></a>` : '') +
-          `<button type="button" class="btn btn--quiet" data-act="logout">${icon('logout')}Log out</button>` +
+          (site ? `<a class="btn btn--quiet" href="${esc(site)}" target="_blank" rel="noopener" title="View website">${icon('external')}<span class="btn__label">View website</span><span class="sr-only"> (opens in a new tab)</span></a>` : '') +
+          `<button type="button" class="btn btn--quiet" data-act="logout" title="Log out">${icon('logout')}<span class="btn__label">Log out</span></button>` +
         '</div>' +
       '</header>' +
       (test ? '<div class="banner banner--test"><strong>Test mode:</strong> changes are saved in this browser only and show on this copy of the website (open <a href="order.html" target="_blank" rel="noopener">the order page</a> after publishing). The live website isn’t affected.</div>' : '') +
       '<div class="banner banner--info" data-restored hidden><span data-restored-text></span> <button type="button" class="btn btn--quiet btn--sm" data-act="drop-restored">Discard them</button></div>' +
       '<div class="layout">' +
         '<nav class="sidenav" aria-label="Admin sections"><ul>' +
-          TABS.map(([key, label, ic]) => `<li><button type="button" data-tab="${key}">${icon(ic)}<span>${esc(label)}</span></button></li>`).join('') +
+          tabsFor().map(([key, label, ic]) => `<li><button type="button" data-tab="${key}">${icon(ic)}<span>${esc(label)}</span></button></li>`).join('') +
         '</ul></nav>' +
         '<main class="main" id="admin-main" tabindex="-1"></main>' +
-      '</div></div>';
+      '</div>' +
+      '<div class="pubbar"><p class="pubbar__status" data-status aria-hidden="true"></p>' +
+        '<button type="button" class="btn btn--quiet btn--sm" data-act="discard" hidden>Discard</button>' +
+        '<button type="button" class="btn btn--primary" data-act="publish" disabled>Publish</button></div>' +
+      '</div>';
     const shell = $('.shell');
     shell.addEventListener('click', onShellClick);
+    // The section tabs stick just under the header on small screens, however tall the header is.
+    const bar = $('.topbar', shell);
+    const syncBar = () => { if (bar.isConnected) root.style.setProperty('--topbar-h', `${bar.offsetHeight}px`); };
+    syncBar();
+    if (window.ResizeObserver) new ResizeObserver(syncBar).observe(bar); else window.addEventListener('resize', syncBar);
     renderTab();
     refreshStatus();
   }
@@ -986,20 +1106,21 @@
       return;
     }
     const act = e.target.closest('[data-act]');
-    if (!act || !$('.topbar, .banner', app()) || !(act.closest('.topbar') || act.closest('.banner'))) return;
+    if (!act || !$('.topbar, .banner', app()) || !(act.closest('.topbar') || act.closest('.banner') || act.closest('.pubbar'))) return;
     const name = act.getAttribute('data-act');
     if (name === 'publish') publish();
+    else if (name === 'preview') openPreview();
     else if (name === 'discard') {
       const ok = await ask({ title: 'Discard your changes?', text: 'Everything you changed since the last publish will be undone.', ok: 'Discard changes', danger: true });
       if (!ok) return;
       state.draft = clone(state.published.doc);
-      store.del(DRAFT_KEY);
+      store.del(DRAFT_KEY());
       $('[data-restored]').hidden = true;
       changed({ rerender: true });
       toast('Changes discarded.');
     } else if (name === 'drop-restored') {
       state.draft = clone(state.published.doc);
-      store.del(DRAFT_KEY);
+      store.del(DRAFT_KEY());
       $('[data-restored]').hidden = true;
       changed({ rerender: true });
       toast('Changes discarded.');
@@ -1020,6 +1141,7 @@
     $$('[data-tab]').forEach((b) => {
       if (b.getAttribute('data-tab') === state.tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
     });
+    if (!tabsFor().some(([k]) => k === state.tab)) state.tab = 'menu';
     const views = { menu: viewMenu, extras: viewExtras, hours: viewHours, ordering: viewOrdering, markets: viewMarkets, wholesale: viewWholesale, history: viewHistory, security: viewSecurity };
     const scrollY = window.scrollY;
     main.innerHTML = '';
@@ -1053,26 +1175,60 @@
   }
 
   /* ------------------------------------------------------------------ publishing */
+  function showProblems(problems, title) {
+    const dlg = openDialog({
+      title, size: 'md', alert: true,
+      body: `<p>${plural(problems.length, 'thing needs', 'things need')} a quick fix:</p><ul class="problems">` +
+        problems.slice(0, 12).map((p, i) => `<li><span>${esc(p.message)}</span> <button type="button" class="btn btn--quiet btn--sm" data-problem="${i}">Show</button></li>`).join('') +
+        '</ul>',
+      foot: '<button type="button" class="btn btn--primary" data-dlg-close>OK</button>',
+    });
+    dlg.body.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-problem]');
+      if (!b) return;
+      dlg.close();
+      goTo(problems[Number(b.getAttribute('data-problem'))].go);
+    });
+  }
+
+  /* Preview: the real website with the unpublished changes, in a new tab (only for whoever opens the link). */
+  const PREVIEW_PAGES = [['order.html', 'Order online (the menu)'], ['index.html', 'Home page'], ['contact.html', 'Contact & hours'],
+    ['farmers-market.html', 'Farmers markets'], ['wholesale.html', 'Wholesale']];
+  async function openPreview() {
+    normalize(state.draft);
+    if (state.tab === 'wholesale') renderTab();
+    const problems = problemsIn(state.draft);
+    if (problems.length) { showProblems(problems, 'Fix these before previewing'); return; }
+    const btns = $$('[data-act="preview"]');
+    btns.forEach((b) => { b.disabled = true; });
+    let res;
+    try {
+      res = await state.backend.preview(state.draft);
+    } catch (ex) {
+      if (ex.code === 'signed_out') handleSaveError(ex); else toast(`Couldn’t make a preview: ${ex.message}`, 'error');
+      return;
+    } finally {
+      btns.forEach((b) => { b.disabled = false; });
+    }
+    const local = state.backend.kind === 'local';
+    const link = (page) => {
+      if (local) return `${page}?preview=local`;
+      try { const u = new URL(page, state.siteUrl); u.searchParams.set('preview', res.token); return u.href; } catch (e) { return ''; }
+    };
+    openDialog({
+      title: 'Preview your changes', size: 'md',
+      body: `<p>${local ? 'Open a page of your test copy of the website with the changes you haven’t published.' : 'Open a page of the website with the changes you haven’t published. Only you see them, in that tab, for the next 3 hours. Nothing changes for customers until you publish.'}</p>` +
+        (isDirty() ? '' : '<p class="note">You haven’t changed anything since the last publish, so the preview looks like the website.</p>') +
+        `<ul class="preview-links">${PREVIEW_PAGES.map(([page, label]) => `<li><a class="btn btn--quiet btn--block" href="${esc(link(page))}" target="_blank" rel="noopener">${icon('eye')}${esc(label)}<span class="sr-only"> (opens in a new tab)</span></a></li>`).join('')}</ul>`,
+      foot: '<button type="button" class="btn btn--primary" data-dlg-close>Done</button>',
+    });
+  }
+
   async function publish(force) {
     normalize(state.draft);
     if (state.tab === 'wholesale') renderTab();
     const problems = problemsIn(state.draft);
-    if (problems.length) {
-      const dlg = openDialog({
-        title: 'Fix these before publishing', size: 'md', alert: true,
-        body: `<p>${plural(problems.length, 'thing needs', 'things need')} a quick fix:</p><ul class="problems">` +
-          problems.slice(0, 12).map((p, i) => `<li><span>${esc(p.message)}</span> <button type="button" class="btn btn--quiet btn--sm" data-problem="${i}">Show</button></li>`).join('') +
-          '</ul>',
-        foot: '<button type="button" class="btn btn--primary" data-dlg-close>OK</button>',
-      });
-      dlg.body.addEventListener('click', (e) => {
-        const b = e.target.closest('[data-problem]');
-        if (!b) return;
-        dlg.close();
-        goTo(problems[Number(b.getAttribute('data-problem'))].go);
-      });
-      return;
-    }
+    if (problems.length) { showProblems(problems, 'Fix these before publishing'); return; }
     const lines = describeChanges(normalized(state.published.doc), state.draft);
     const dlg = openDialog({
       title: force ? 'Publish your version?' : 'Publish these changes?', size: 'md',
@@ -1081,7 +1237,7 @@
         : '<p>Save the current version.</p>') +
         '<div class="field"><label for="pub-note">Note for the history <span class="muted">(optional)</span></label>' +
         '<input class="input" id="pub-note" maxlength="140" placeholder="For example: new fall prices"></div>' +
-        `<p class="muted small">${state.backend.kind === 'local' ? 'Your copy of the website shows the changes when you reload it.' : 'The website shows the changes within about a minute.'}</p>`,
+        `<p class="muted small">${state.backend.kind === 'local' ? 'Your copy of the website shows the changes when you reload it.' : 'The website shows the changes right away. Refresh any page that’s already open.'}</p>`,
       foot: '<button type="button" class="btn btn--quiet" data-dlg-close>Cancel</button><button type="submit" class="btn btn--primary" data-ok>Publish</button>',
       focus: '#pub-note',
       onSubmit: async (d) => {
@@ -1092,12 +1248,12 @@
           const res = await state.backend.save(state.draft, state.published.version, $('#pub-note', d.box).value.trim(), force);
           state.published = { version: res.version, savedAt: res.savedAt, doc: res.doc };
           state.draft = clone(res.doc);
-          store.del(DRAFT_KEY);
+          store.del(DRAFT_KEY());
           const r = $('[data-restored]');
           if (r) r.hidden = true;
           d.close(true);
           changed({ rerender: true });
-          toast(state.backend.kind === 'local' ? 'Published to your test copy.' : 'Published! The website updates within a minute.', 'ok');
+          toast(state.backend.kind === 'local' ? 'Published to your test copy.' : 'Published! It’s on the website now. Refresh the page to see it.', 'ok');
         } catch (ex) {
           d.close(false);
           handleSaveError(ex);
@@ -1110,7 +1266,7 @@
   async function handleSaveError(ex) {
     if (ex.code === 'signed_out') {
       toast('Your login ended. Log in again; your changes are kept.', 'error');
-      store.trySet(DRAFT_KEY, { base: state.published.version, savedAt: Date.now(), doc: state.draft });
+      store.trySet(DRAFT_KEY(), { base: state.published.version, savedAt: Date.now(), doc: state.draft });
       renderLogin({ message: 'Your login ended. Log in again to publish. Your changes are kept in this browser.' });
       return;
     }
@@ -1137,7 +1293,7 @@
         state.published = { version: loaded.version, savedAt: loaded.savedAt, doc: loaded.doc };
         state.draft = clone(loaded.doc);
         await state.backend.preload([loaded.doc]);
-        store.del(DRAFT_KEY);
+        store.del(DRAFT_KEY());
         changed({ rerender: true });
         toast('Loaded the latest published version.');
       }
@@ -1156,7 +1312,7 @@
       try {
         const s = await state.backend.session();
         if (!s.authenticated && state.draft) {
-          store.trySet(DRAFT_KEY, { base: state.published.version, savedAt: Date.now(), doc: state.draft });
+          store.trySet(DRAFT_KEY(), { base: state.published.version, savedAt: Date.now(), doc: state.draft });
           clearInterval(aliveTimer);
           renderLogin({ message: 'Your login ended. Log in again to keep going. Your changes are kept in this browser.' });
         }
@@ -1182,41 +1338,56 @@
     setTimeout(() => { t.classList.add('is-leaving'); setTimeout(() => t.remove(), 300); }, 8000);
   }
 
+  const AVAIL = [['on', 'On the menu'], ['today', 'Sold out today'], ['soldout', 'Sold out'], ['hidden', 'Hidden']];
+  function availSelect(it, id, name) {
+    const cur = availOf(it);
+    const opts = AVAIL.filter(([k]) => isOwner() || k !== 'hidden' || cur === 'hidden');
+    return `<label class="sr-only" for="${id}">Availability of ${esc(name)}</label>` +
+      `<select class="input input--sm avail avail--${cur}" id="${id}" data-field="avail"${!isOwner() && cur === 'hidden' ? ' disabled' : ''}>` +
+      opts.map(([k, l]) => `<option value="${k}"${k === cur ? ' selected' : ''}>${l}</option>`).join('') + '</select>';
+  }
   function rowHTML(it, ci, gi, ii, len) {
     const id = `r-${ci}-${gi}-${ii}`;
     const name = it.name || 'Untitled item';
     const thumb = it.img ? photoUrl(it.img, 'thumb') : '';
+    const av = availOf(it);
+    const owner = isOwner();
     const badges = [];
-    if (it.soldOut) badges.push(['warn', 'Sold out']);
-    if (it.hidden) badges.push(['muted', 'Hidden']);
+    if (av === 'today') badges.push(['warn', 'Sold out today']);
+    if (av === 'soldout') badges.push(['warn', 'Sold out']);
+    if (av === 'hidden') badges.push(['muted', 'Hidden']);
     if (it.popular) badges.push(['pink', 'Bestseller']);
     if (it.sizes && it.sizes.length) badges.push(['', plural(it.sizes.length, 'size')]);
     if ((it.addons || []).length) badges.push(['', 'Extras']);
     if (it.notice) badges.push(['', `${it.notice} days’ notice`]);
     if (it.labels && it.labels.length) badges.push(['', `${it.labels[0]} spice`]);
+    if ((it.more || []).length) badges.push(['', plural(it.more.length + 1, 'photo')]);
     const search = fold([it.name, it.desc, (it.sizes || []).map((s) => s.name).join(' ')].join(' '));
-    const flags = [it.soldOut ? 'soldout' : '', it.hidden ? 'hidden' : '', it.img ? '' : 'nophoto'].join(' ');
-    const sr = `<span class="sr-only">: ${esc(name)}</span>`;
-    return `<li class="row${it.hidden ? ' is-hidden' : ''}${it.soldOut ? ' is-soldout' : ''}" data-path="${ci}.${gi}.${ii}" data-search="${esc(search)}" data-flags="${flags}">` +
+    const flags = [av === 'soldout' || av === 'today' ? 'soldout' : '', av === 'hidden' ? 'hidden' : '', it.img ? '' : 'nophoto'].join(' ');
+    const price = it.sizes && it.sizes.length
+      ? (owner ? `<button type="button" class="link-btn" data-act="edit-item">From ${money(it.price)}<span class="sr-only">, edit sizes of ${esc(name)}</span></button>` : `<span class="muted">From ${money(it.price)}</span>`)
+      : owner
+        ? `<label class="sr-only" for="${id}-price">Price of ${esc(name)}</label><span class="money"><span aria-hidden="true">$</span>` +
+          `<input class="input input--price" id="${id}-price" data-field="price" inputmode="decimal" autocomplete="off" value="${priceInput(it.price)}"></span>`
+        : `<span class="muted">${money(it.price)}</span>`;
+    const open = owner && state.openItem === it;
+    return `<li class="row${av === 'hidden' ? ' is-hidden' : ''}${av === 'soldout' || av === 'today' ? ' is-soldout' : ''}${open ? ' show-tools' : ''}" data-path="${ci}.${gi}.${ii}" data-search="${esc(search)}" data-flags="${flags}">` +
       `<span class="row__img">${thumb ? `<img src="${esc(thumb)}" alt="" width="56" height="56" loading="lazy">` : icon('photo')}</span>` +
       '<div class="row__main">' +
-        `<button type="button" class="row__name" data-act="edit-item" id="${id}-name">${esc(name)}<span class="sr-only"> (edit)</span></button>` +
+        (owner ? `<button type="button" class="row__name" data-act="edit-item" id="${id}-name">${esc(name)}<span class="sr-only"> (edit)</span></button>` : `<span class="row__name row__name--plain" id="${id}-name">${esc(name)}</span>`) +
         (badges.length ? `<ul class="badges">${badges.map(([k, t]) => `<li class="badge${k ? ` badge--${k}` : ''}">${esc(t)}</li>`).join('')}</ul>` : '') +
       '</div>' +
-      '<div class="row__price">' +
-        (it.sizes && it.sizes.length
-          ? `<button type="button" class="link-btn" data-act="edit-item">From ${money(it.price)}<span class="sr-only">, edit sizes of ${esc(name)}</span></button>`
-          : `<label class="sr-only" for="${id}-price">Price of ${esc(name)}</label><span class="money"><span aria-hidden="true">$</span>` +
-            `<input class="input input--price" id="${id}-price" data-field="price" inputmode="decimal" autocomplete="off" value="${priceInput(it.price)}"></span>`) +
+      '<div class="row__ctl">' +
+        `<div class="row__price">${price}</div>` +
+        `<div class="row__avail">${availSelect(it, `${id}-av`, name)}</div>` +
       '</div>' +
-      '<div class="row__toggles">' +
-        `<label class="switch"><input type="checkbox" data-field="soldOut"${it.soldOut ? ' checked' : ''}><span>Sold out${sr}</span></label>` +
-        `<label class="switch"><input type="checkbox" data-field="shown"${it.hidden ? '' : ' checked'}><span>On menu${sr}</span></label>` +
-      '</div>' +
-      '<div class="row__tools">' +
-        `<button type="button" class="icon-btn" data-act="item-up" aria-label="Move ${esc(name)} up"${ii === 0 ? ' disabled' : ''}>${icon('up')}</button>` +
-        `<button type="button" class="icon-btn" data-act="item-down" aria-label="Move ${esc(name)} down"${ii === len - 1 ? ' disabled' : ''}>${icon('down')}</button>` +
-        `<button type="button" class="icon-btn icon-btn--danger" data-act="del-item" aria-label="Delete ${esc(name)}">${icon('trash')}</button>` +
+      (owner ? `<button type="button" class="icon-btn row__more" data-act="row-more" aria-expanded="${open}" aria-controls="${id}-tools" aria-label="Move or delete ${esc(name)}" title="Move or delete">${icon('more')}</button>` : '') +
+      `<div class="row__tools" id="${id}-tools">` + (owner
+        ? `<button type="button" class="icon-btn drag-handle" data-drag aria-label="Drag to move ${esc(name)} (or use the arrow buttons)" title="Drag to move">${icon('grip')}</button>` +
+          `<button type="button" class="icon-btn" data-act="item-up" aria-label="Move ${esc(name)} up"${ii === 0 ? ' disabled' : ''}>${icon('up')}</button>` +
+          `<button type="button" class="icon-btn" data-act="item-down" aria-label="Move ${esc(name)} down"${ii === len - 1 ? ' disabled' : ''}>${icon('down')}</button>` +
+          `<button type="button" class="icon-btn icon-btn--danger" data-act="del-item" aria-label="Delete ${esc(name)}">${icon('trash')}</button>`
+        : '') +
       '</div></li>';
   }
 
@@ -1228,26 +1399,157 @@
     const meta = [plural(n, 'item')];
     if (cat.groups) meta.push(plural(cat.groups.length, 'section'));
     if (cat.notice) meta.push(`${cat.notice} days’ notice`);
+    const owner = isOwner();
     return `<section class="cat card" data-cat="${ci}" aria-labelledby="cat-title-${ci}">` +
       '<header class="cat__head">' +
         `<button type="button" class="cat__toggle" data-act="toggle-cat" aria-expanded="${!collapsed}" aria-controls="${bodyId}">` +
           `<svg class="i chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg><span class="sr-only">Show or hide </span></button>` +
         `<h2 id="cat-title-${ci}" tabindex="-1">${esc(cat.name || 'Untitled category')}</h2>` +
         `<span class="cat__meta">${esc(meta.join(' · '))}</span>` +
-        '<div class="cat__tools">' +
+        (owner ? '<div class="cat__tools">' +
+          `<button type="button" class="btn btn--quiet btn--sm" data-act="bulk">${icon('percent')}Change prices<span class="sr-only"> in ${esc(cat.name)}</span></button>` +
           `<button type="button" class="btn btn--quiet btn--sm" data-act="edit-cat">${icon('edit')}Edit<span class="sr-only"> category ${esc(cat.name)}</span></button>` +
+          '<span class="cat__move">' +
           `<button type="button" class="icon-btn" data-act="cat-up" aria-label="Move category ${esc(cat.name)} up"${ci === 0 ? ' disabled' : ''}>${icon('up')}</button>` +
           `<button type="button" class="icon-btn" data-act="cat-down" aria-label="Move category ${esc(cat.name)} down"${ci === last ? ' disabled' : ''}>${icon('down')}</button>` +
           `<button type="button" class="icon-btn icon-btn--danger" data-act="del-cat" aria-label="Delete category ${esc(cat.name)}">${icon('trash')}</button>` +
-        '</div></header>' +
+          '</span>' +
+        '</div>' : '') + '</header>' +
       `<div class="cat__body" id="${bodyId}"${collapsed ? ' hidden' : ''}>` +
         (cat.note ? `<p class="cat__note">${esc(cat.note)}</p>` : '') +
         secs.map((g, gi) => `<div class="sec" data-sec="${ci}.${gi}">` +
           (cat.groups ? `<h3 class="sec__title">${esc(g.title || 'Untitled section')}</h3>` : '') +
           (g.items.length ? `<ul class="rows">${g.items.map((it, ii) => rowHTML(it, ci, gi, ii, g.items.length)).join('')}</ul>` : '<p class="muted small sec__empty">No items yet.</p>') +
-          `<button type="button" class="btn btn--quiet btn--sm add-here" data-act="add-here">${icon('plus')}Add item to ${esc(cat.groups ? g.title : cat.name)}</button>` +
+          (owner ? `<button type="button" class="btn btn--quiet btn--sm add-here" data-act="add-here">${icon('plus')}Add item to ${esc(cat.groups ? g.title : cat.name)}</button>` : '') +
         '</div>').join('') +
       '</div></section>';
+  }
+
+  /* Drag an item by its handle to a new place in the same list (the arrow buttons do the same from the keyboard). */
+  function startDrag(e, handle) {
+    const li = handle.closest('.row');
+    const list = li && li.parentElement;
+    if (!list || e.button > 0) return;
+    const rows = $$(':scope > .row', list).filter((r) => !r.hidden);
+    const from = rows.indexOf(li);
+    if (from < 0 || rows.length < 2) return;
+    e.preventDefault();
+    const rects = rows.map((r) => r.getBoundingClientRect());
+    const startY = e.clientY;
+    let to = from;
+    li.classList.add('is-dragging');
+    try { handle.setPointerCapture(e.pointerId); } catch (ex) { /* ignore */ }
+    const move = (ev) => {
+      const dy = ev.clientY - startY;
+      li.style.transform = `translateY(${dy}px)`;
+      const mid = rects[from].top + rects[from].height / 2 + dy;
+      to = rows.length - 1;
+      for (let i = 0; i < rects.length; i++) { if (mid < rects[i].top + rects[i].height / 2) { to = i; break; } }
+      rows.forEach((r, i) => {
+        if (r === li) return;
+        let shift = 0;
+        if (from < to && i > from && i <= to) shift = -rects[from].height;
+        if (from > to && i >= to && i < from) shift = rects[from].height;
+        r.style.transform = shift ? `translateY(${shift}px)` : '';
+      });
+    };
+    const end = () => {
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', end);
+      handle.removeEventListener('pointercancel', end);
+      rows.forEach((r) => { r.style.transform = ''; });
+      li.classList.remove('is-dragging');
+      if (to === from) return;
+      const p = parsePath(li.getAttribute('data-path'));
+      const target = parsePath(rows[to].getAttribute('data-path')).ii;
+      const items = listAt(state.draft, p.ci, p.gi);
+      const [moved] = items.splice(p.ii, 1);
+      items.splice(target, 0, moved);
+      changed({ rerender: true, focus: `[data-path="${p.ci}.${p.gi}.${target}"] [data-drag]` });
+      toast(`Moved “${moved.name}”.`);
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', end);
+    handle.addEventListener('pointercancel', end);
+  }
+
+  /* Change many prices at once: by a percentage, rounded. */
+  function openBulkPrices(ci) {
+    const d = state.draft;
+    const ROUND = [['0.01', 'To the cent'], ['0.05', 'To 5¢'], ['0.1', 'To 10¢'], ['0.25', 'To 25¢'], ['0.5', 'To 50¢'], ['1', 'To the dollar']];
+    const body =
+      '<div class="grid-2">' +
+        '<div class="field"><label for="bp-which">Items</label><select class="input" id="bp-which">' +
+          `<option value="${ci}">${esc(d.menu.categories[ci].name)}</option><option value="all">The whole menu</option></select></div>` +
+        '<div class="field"><label for="bp-pct">Change by (%)</label><input class="input input--num" id="bp-pct" type="number" step="0.5" min="-90" max="200" inputmode="decimal" placeholder="e.g. 5 or -10" aria-describedby="bp-pct-hint">' +
+          '<p class="hint" id="bp-pct-hint">5 raises prices by 5%. Use a minus sign to lower them.</p></div>' +
+        '<div class="field"><label for="bp-round">Round new prices</label><select class="input" id="bp-round">' +
+          ROUND.map(([v, l]) => `<option value="${v}"${v === '0.05' ? ' selected' : ''}>${l}</option>`).join('') + '</select></div>' +
+        '<label class="check field--gap"><input type="checkbox" id="bp-sizes" checked><span>Include items with sizes (every size changes)</span></label>' +
+      '</div>' +
+      '<div class="bp-preview" data-bp-rows aria-live="polite"></div>';
+    const dlg = openDialog({
+      title: 'Change prices', size: 'md', body, focus: '#bp-pct',
+      foot: '<button type="button" class="btn btn--quiet" data-dlg-close>Cancel</button><button type="submit" class="btn btn--primary" data-ok disabled>Change prices</button>',
+      onSubmit: () => apply(),
+    });
+    const box = dlg.box;
+    const q = (sel) => $(sel, box);
+    const roundTo = (v, step) => round2(Math.max(0, Math.round(v / step) * step));
+    function plan() {
+      const pct = Number(q('#bp-pct').value);
+      const step = Number(q('#bp-round').value);
+      const which = q('#bp-which').value;
+      const withSizes = q('#bp-sizes').checked;
+      const out = [];
+      if (!q('#bp-pct').value || !Number.isFinite(pct) || pct === 0 || pct < -90 || pct > 200) return { pct: null, out };
+      d.menu.categories.forEach((cat, i) => {
+        if (which !== 'all' && String(i) !== which) return;
+        sectionsOf(cat).forEach((g) => g.items.forEach((it) => {
+          if (it.sizes && it.sizes.length) {
+            if (!withSizes) return;
+            const next = it.sizes.map((sz) => roundTo(sz.price * (1 + pct / 100), step));
+            if (next.some((v, k) => v !== it.sizes[k].price)) out.push({ it, next });
+          } else {
+            const v = roundTo(it.price * (1 + pct / 100), step);
+            if (v !== it.price) out.push({ it, next: v });
+          }
+        }));
+      });
+      return { pct, out };
+    }
+    function draw() {
+      const { pct, out } = plan();
+      const ok = q('[data-ok]');
+      ok.disabled = !out.length;
+      if (pct === null) { q('[data-bp-rows]').innerHTML = '<p class="muted small">Type a percentage to see the new prices.</p>'; return; }
+      if (!out.length) { q('[data-bp-rows]').innerHTML = '<p class="muted small">No prices change with this setting.</p>'; return; }
+      const show = (x) => (Array.isArray(x.next)
+        ? [x.it.sizes.map((sz) => money(sz.price)).join(' / '), x.next.map((v) => money(v)).join(' / ')]
+        : [money(x.it.price), money(x.next)]);
+      q('[data-bp-rows]').innerHTML = `<p class="small"><strong>${plural(out.length, 'item')}</strong> will change:</p>` +
+        '<table class="table"><thead><tr><th scope="col">Item</th><th scope="col">Now</th><th scope="col">New</th></tr></thead><tbody>' +
+        out.slice(0, 12).map((x) => { const [a, b] = show(x); return `<tr><td>${esc(x.it.name)}</td><td>${a}</td><td><strong>${b}</strong></td></tr>`; }).join('') +
+        '</tbody></table>' + (out.length > 12 ? `<p class="muted small">…and ${out.length - 12} more.</p>` : '');
+      ok.textContent = `Change ${plural(out.length, 'price')}`;
+    }
+    function apply() {
+      const { pct, out } = plan();
+      if (!out.length) return;
+      const snap = clone(d);
+      out.forEach((x) => {
+        if (Array.isArray(x.next)) {
+          x.it.sizes.forEach((sz, k) => { sz.price = x.next[k]; });
+          x.it.price = Math.min.apply(null, x.it.sizes.map((sz) => sz.price));
+        } else x.it.price = x.next;
+      });
+      dlg.close(true);
+      changed({ rerender: true });
+      toastUndo(`Changed ${plural(out.length, 'price')} by ${pct > 0 ? '+' : ''}${pct}%. Publish when you’re ready.`, snap);
+    }
+    box.addEventListener('input', draw);
+    box.addEventListener('change', draw);
+    draw();
   }
 
   function viewMenu(main) {
@@ -1259,11 +1561,14 @@
     view.innerHTML =
       '<div class="view__head"><div><h1 tabindex="-1">Menu</h1>' +
         `<p class="muted">${plural(c.items, 'item')} in ${plural(cats.length, 'category', 'categories')}` +
-        `${c.soldOut ? ` · ${c.soldOut} sold out` : ''}${c.hidden ? ` · ${c.hidden} hidden` : ''}. Change a price right in the list, or select an item to edit everything.</p></div>` +
-        '<div class="view__actions">' +
+        `${c.soldOut ? ` · ${c.soldOut} sold out` : ''}${c.hidden ? ` · ${c.hidden} hidden` : ''}. ` +
+        (isOwner()
+          ? 'Change a price right in the list, or select an item to edit everything. “Sold out today” turns itself off tomorrow.'
+          : 'Mark items sold out here. “Sold out today” turns itself off tomorrow. Prices and items are changed by the owner.') + '</p></div>' +
+        (isOwner() ? '<div class="view__actions">' +
           `<button type="button" class="btn btn--primary" data-act="add-item">${icon('plus')}Add item</button>` +
           `<button type="button" class="btn btn--quiet" data-act="add-cat">${icon('plus')}Add category</button>` +
-        '</div></div>' +
+        '</div>' : '') + '</div>' +
       '<div class="toolbar">' +
         `<div class="search">${icon('search')}<label class="sr-only" for="menu-find">Find an item</label>` +
           `<input class="input" id="menu-find" type="search" placeholder="Find an item" autocomplete="off" value="${esc(state.search)}"></div>` +
@@ -1302,15 +1607,18 @@
       if (parsePrice(e.target.value) !== null) e.target.value = priceInput(it.price);
     });
     view.addEventListener('change', (e) => {
-      const f = e.target.getAttribute('data-field');
-      if (f !== 'soldOut' && f !== 'shown') return;
+      if (e.target.getAttribute('data-field') !== 'avail') return;
       const li = e.target.closest('.row');
       const it = itemFromEl(e.target);
-      if (f === 'soldOut') { if (e.target.checked) it.soldOut = true; else delete it.soldOut; }
-      else if (e.target.checked) delete it.hidden; else it.hidden = true;
-      replaceRow(li, `[data-field="${f}"]`);
+      setAvail(it, e.target.value);
+      replaceRow(li, '[data-field="avail"]');
       changed();
-      toast(`${it.name}: ${f === 'soldOut' ? (it.soldOut ? 'marked sold out' : 'available again') : (it.hidden ? 'hidden from the menu' : 'back on the menu')}. Publish to update the website.`);
+      const msg = { on: 'back on the menu', today: 'sold out for today (back on tomorrow by itself)', soldout: 'sold out until you change it', hidden: 'hidden from the menu' }[e.target.value];
+      toast(`${it.name}: ${msg}. Publish to update the website.`);
+    });
+    view.addEventListener('pointerdown', (e) => {
+      const h = e.target.closest('[data-drag]');
+      if (h) startDrag(e, h);
     });
     view.addEventListener('click', async (e) => {
       const chip = e.target.closest('[data-filter]');
@@ -1340,11 +1648,28 @@
         state.search = '';
         state.filter = 'all';
         renderTab('#menu-find');
-      } else if (act === 'add-item') openItemEditor(null, { ci: 0, gi: 0 });
+      } else if (!isOwner()) {
+        return;
+      } else if (act === 'bulk') openBulkPrices(ci);
+      else if (act === 'add-item') openItemEditor(null, { ci: 0, gi: 0 });
       else if (act === 'add-here') {
         const sec = btn.closest('[data-sec]').getAttribute('data-sec').split('.').map(Number);
         openItemEditor(null, { ci: sec[0], gi: sec[1] });
       } else if (act === 'edit-item') openItemEditor(path);
+      else if (act === 'row-more') {
+        // Phones: the move/delete buttons sit behind "⋯" so the name and the sold-out menu get the room.
+        const it = itemAt(d, path);
+        const open = state.openItem !== it;
+        state.openItem = open ? it : null;
+        $$('.row.show-tools', view).forEach((r) => {
+          if (r === rowEl) return;
+          r.classList.remove('show-tools');
+          const b = $('[data-act="row-more"]', r);
+          if (b) b.setAttribute('aria-expanded', 'false');
+        });
+        rowEl.classList.toggle('show-tools', open);
+        btn.setAttribute('aria-expanded', String(open));
+      }
       else if (act === 'add-cat') openCategoryEditor(null);
       else if (act === 'edit-cat') openCategoryEditor(ci);
       else if (act === 'cat-up' || act === 'cat-down') {
@@ -1456,9 +1781,12 @@
     }
     const orig = isNew ? null : findOriginal(d.menu.categories[path.ci].id, src.slug);
     let img = work.img || '';
+    let alt = work.alt || '';
+    let more = (work.more || []).map((p) => ({ img: p.img, alt: p.alt || '' }));
+    const MAX_MORE = 5;
     const groups = Object.entries(d.menu.addonGroups);
     const sizeLabel = (k) => (SIZE_TYPES.find((x) => x[0] === (k || '')) || SIZE_TYPES[0])[1];
-    const avail = work.hidden ? 'hidden' : work.soldOut ? 'soldout' : 'on';
+    const avail = availOf(work);
     const body =
       '<div class="editor"><div class="editor__main">' +
         '<div class="field"><label for="ie-name">Name <span class="req" aria-hidden="true">*</span></label>' +
@@ -1486,7 +1814,7 @@
           '<p class="hint">Edit the choices and their prices in the <strong>Extras</strong> section.</p>' +
         '</fieldset>' +
       '</div><div class="editor__side">' +
-        '<div class="field"><span class="label" id="ie-photo-label">Photo</span>' +
+        '<div class="field"><span class="label" id="ie-photo-label">Photos</span>' +
           '<div class="photo-box" data-photo-box></div>' +
           '<div class="btn-row">' +
             `<label class="btn btn--quiet btn--sm file-btn">${icon('upload')}<span data-upload-label>Upload photo</span>` +
@@ -1494,12 +1822,18 @@
             '<button type="button" class="btn btn--quiet btn--sm" data-act="photo-remove">Remove photo</button>' +
             `<button type="button" class="btn btn--quiet btn--sm" data-act="photo-restore"${orig && orig.img ? '' : ' hidden'}>Use original photo</button>` +
           '</div>' +
+          '<div class="field field--tight" data-alt-field><label for="ie-alt">Photo description <span class="muted">(read aloud to people who can’t see it)</span></label>' +
+            `<input class="input" id="ie-alt" maxlength="140" value="${esc(alt)}" placeholder="e.g. Chocolate croissant cut in half"></div>` +
+          '<div data-more-wrap><p class="label">More photos <span class="muted small">(shown in the item’s window on the order page)</span></p><ul class="photo-list" data-more></ul>' +
+            `<label class="btn btn--quiet btn--sm file-btn" data-more-add>${icon('plus')}<span>Add more photos</span>` +
+              '<input type="file" class="sr-only" data-more-input multiple accept="image/jpeg,image/png,image/webp,image/heic,image/heif" aria-describedby="ie-photo-status"></label></div>' +
           '<p class="hint" id="ie-photo-status" data-photo-status aria-live="polite">JPG, PNG or WebP. Large photos are resized for you.</p></div>' +
         '<div class="field"><label for="ie-cat">Category</label><select class="input" id="ie-cat"></select></div>' +
         '<div class="field" data-sec-field><label for="ie-sec">Section</label><select class="input" id="ie-sec"></select></div>' +
         '<fieldset class="field"><legend>Availability</legend><div class="radios">' +
           `<label class="check"><input type="radio" name="ie-avail" value="on"${avail === 'on' ? ' checked' : ''}><span>On the menu</span></label>` +
-          `<label class="check"><input type="radio" name="ie-avail" value="soldout"${avail === 'soldout' ? ' checked' : ''}><span>Sold out <span class="muted small">(shown, can’t be ordered)</span></span></label>` +
+          `<label class="check"><input type="radio" name="ie-avail" value="today"${avail === 'today' ? ' checked' : ''}><span>Sold out today <span class="muted small">(back on tomorrow by itself)</span></span></label>` +
+          `<label class="check"><input type="radio" name="ie-avail" value="soldout"${avail === 'soldout' ? ' checked' : ''}><span>Sold out <span class="muted small">(shown, can’t be ordered, until you change it)</span></span></label>` +
           `<label class="check"><input type="radio" name="ie-avail" value="hidden"${avail === 'hidden' ? ' checked' : ''}><span>Hidden <span class="muted small">(not shown)</span></span></label>` +
         '</div></fieldset>' +
         `<label class="check"><input type="checkbox" id="ie-pop"${work.popular ? ' checked' : ''}><span>Bestseller <span class="muted small">(badge on the menu, and shown on the home page)</span></span></label>` +
@@ -1558,12 +1892,25 @@
     function drawPhoto() {
       const url = img ? photoUrl(img, 'full') : '';
       q('[data-photo-box]').innerHTML = url
-        ? `<img src="${esc(url)}" alt="Current photo of ${esc(q('#ie-name').value || 'this item')}">`
+        ? `<img src="${esc(url)}" alt="Main photo of ${esc(q('#ie-name').value || 'this item')}">`
         : `<div class="photo-box__empty">${icon('photo')}<span>No photo</span></div>`;
       q('[data-act="photo-remove"]').hidden = !img;
       q('[data-upload-label]').textContent = img ? 'Replace photo' : 'Upload photo';
       const r = q('[data-act="photo-restore"]');
       r.hidden = !(orig && orig.img && orig.img !== img);
+      q('[data-alt-field]').hidden = !img;
+      q('[data-more-wrap]').hidden = !img;
+      drawMore();
+    }
+    function drawMore(focus) {
+      const list = q('[data-more]');
+      list.innerHTML = more.map((p, i) => `<li data-m="${i}"><img src="${esc(photoUrl(p.img, 'thumb'))}" alt="" width="56" height="56">` +
+        `<div class="field"><label class="sr-only" for="ie-more-${i}">Description of photo ${i + 2}</label>` +
+        `<input class="input input--sm" id="ie-more-${i}" data-more-alt maxlength="140" value="${esc(p.alt)}" placeholder="Photo description"></div>` +
+        `<button type="button" class="icon-btn" data-act="more-main" aria-label="Make photo ${i + 2} the main photo" title="Make main photo">${icon('star')}</button>` +
+        `<button type="button" class="icon-btn icon-btn--danger" data-act="more-del" aria-label="Remove photo ${i + 2}">${icon('trash')}</button></li>`).join('');
+      q('[data-more-add]').hidden = more.length >= MAX_MORE;
+      if (focus) { const el = $(focus, box); if (el) el.focus(); }
     }
     function collect(loose) {
       const out = Object.assign({}, work);
@@ -1585,12 +1932,15 @@
       if (q('#ie-pop').checked) out.popular = true; else delete out.popular;
       const n = Number(q('#ie-notice').value);
       if (n > 0) out.notice = n; else delete out.notice;
-      const av = $('input[name="ie-avail"]:checked', box).value;
-      delete out.hidden;
-      delete out.soldOut;
-      if (av === 'hidden') out.hidden = true;
-      if (av === 'soldout') out.soldOut = true;
-      if (img) out.img = img; else delete out.img;
+      setAvail(out, $('input[name="ie-avail"]:checked', box).value);
+      delete out.img; delete out.alt; delete out.more;
+      if (img) {
+        out.img = img;
+        const a = q('#ie-alt').value.trim();
+        if (a) out.alt = a;
+        const m = more.map((p) => (p.alt.trim() ? { img: p.img, alt: p.alt.trim() } : { img: p.img }));
+        if (m.length) out.more = m;
+      }
       if (loose) { out._ci = ci; out._gi = gi; }
       return out;
     }
@@ -1661,6 +2011,7 @@
       if (t.id === 'ie-desc') q('[data-count]').textContent = t.value.length;
       const sz = t.getAttribute('data-sz');
       if (sz) sizes[Number(t.closest('tr').getAttribute('data-i'))][sz] = t.value;
+      if (t.hasAttribute('data-more-alt')) more[Number(t.closest('[data-m]').getAttribute('data-m'))].alt = t.value;
       if (t.getAttribute('aria-invalid')) fieldError(t, '');
     });
     box.addEventListener('change', async (e) => {
@@ -1696,6 +2047,29 @@
         } finally {
           box.classList.remove('is-busy');
         }
+      } else if (t.hasAttribute('data-more-input')) {
+        const files = Array.from(t.files || []).slice(0, MAX_MORE - more.length);
+        t.value = '';
+        if (!files.length) return;
+        const status = q('[data-photo-status]');
+        box.classList.add('is-busy');
+        let added = 0;
+        try {
+          for (const file of files) {
+            status.textContent = `Preparing photo ${added + 1} of ${files.length}…`;
+            const { full, thumb } = await preparePhoto(file);
+            status.textContent = `Uploading photo ${added + 1} of ${files.length}…`;
+            const res = await state.backend.upload(full, thumb);
+            more.push({ img: res.ref, alt: '' });
+            added++;
+          }
+          status.textContent = `${plural(added, 'photo')} added. Save the item to keep ${added === 1 ? 'it' : 'them'}.`;
+        } catch (ex) {
+          status.textContent = (added ? `${plural(added, 'photo')} added. ` : '') + (ex.code === 'signed_out' ? 'Your login ended. Log in again to upload.' : ex.message || 'A photo couldn’t be uploaded.');
+        } finally {
+          box.classList.remove('is-busy');
+          drawMore(added ? `#ie-more-${more.length - 1}` : null);
+        }
       }
     });
     box.addEventListener('click', async (e) => {
@@ -1716,10 +2090,29 @@
           const edge = act === 'sz-up' ? to === 0 : to === sizes.length - 1;
           drawSizes(`tr[data-i="${to}"] [data-act="${edge ? (act === 'sz-up' ? 'sz-down' : 'sz-up') : act}"]`);
         }
+      } else if (act === 'more-main' || act === 'more-del') {
+        const i = Number(b.closest('[data-m]').getAttribute('data-m'));
+        if (act === 'more-del') {
+          more.splice(i, 1);
+          drawMore(more.length ? `#ie-more-${Math.min(i, more.length - 1)}` : '[data-more-input]');
+          q('[data-photo-status]').textContent = 'Photo removed. Save the item to keep this change.';
+        } else {
+          const next = more[i];
+          more[i] = { img, alt: q('#ie-alt').value };
+          img = next.img;
+          q('#ie-alt').value = next.alt;
+          drawPhoto();
+          q('[data-photo-status]').textContent = 'Main photo changed. Save the item to keep it.';
+          q('#ie-alt').focus();
+        }
       } else if (act === 'photo-remove') {
-        img = '';
+        if (more.length) {
+          const next = more.shift();
+          img = next.img;
+          q('#ie-alt').value = next.alt;
+        } else img = '';
         drawPhoto();
-        q('[data-photo-status]').textContent = 'Photo removed. Save the item to keep this change.';
+        q('[data-photo-status]').textContent = more.length || img ? 'Photo removed; the next photo is now the main one. Save the item to keep this change.' : 'Photo removed. Save the item to keep this change.';
         q('[data-photo-input]').focus();
       } else if (act === 'photo-restore') {
         img = orig.img;
@@ -2017,16 +2410,44 @@
   }
 
   /* ------------------------------------------------------------------ hours and closed days */
+  /* US holidays a bakery often closes for (next date of each). */
+  function holidayDates() {
+    const t = todayLA();
+    const nth = (y, month, weekday, n) => {
+      const first = new Date(Date.UTC(y, month, 1)).getUTCDay();
+      return new Date(Date.UTC(y, month, 1 + ((weekday - first + 7) % 7) + (n - 1) * 7)).toISOString().slice(0, 10);
+    };
+    const iso = (y, m, d) => new Date(Date.UTC(y, m, d)).toISOString().slice(0, 10);
+    const list = (y) => [
+      ['New Year’s Day', iso(y, 0, 1)], ['Independence Day', iso(y, 6, 4)], ['Thanksgiving', nth(y, 10, 4, 4)],
+      ['Christmas Eve', iso(y, 11, 24)], ['Christmas Day', iso(y, 11, 25)], ['New Year’s Eve', iso(y, 11, 31)],
+    ];
+    const y = Number(t.slice(0, 4));
+    return list(y).concat(list(y + 1)).filter(([, date]) => date >= t)
+      .reduce((acc, h) => (acc.some((x) => x[0] === h[0]) ? acc : acc.concat([h])), []).sort((a, b) => (a[1] < b[1] ? -1 : 1));
+  }
+
   function viewHours(main) {
     const s = state.draft.site;
+    if (!Array.isArray(s.special)) s.special = [];
     const today = todayLA();
+    const owner = isOwner();
     const view = doc.createElement('div');
     view.className = 'view';
+    const listed = (arr, kind) => arr.map((x, i) => {
+      const past = (x.to || x.date) < today;
+      const what = kind === 'special' ? `${fmtTime(x.open)} – ${fmtTime(x.close)}` : 'Closed';
+      return `<li class="${past ? 'is-past' : ''}"><span><strong>${esc(fmtRange(x))}</strong> · ${what}${x.note ? ` · ${esc(x.note)}` : ''}${past ? ' <span class="badge badge--muted">Past</span>' : ''}</span>` +
+        `<button type="button" class="btn btn--quiet btn--sm" data-act="del-${kind}" data-i="${i}">${icon('trash')}Remove<span class="sr-only"> ${esc(fmtRange(x))}</span></button></li>`;
+    }).join('');
+    const hol = holidayDates().filter(([, date]) => !s.closures.some((c) => c.date <= date && (c.to || c.date) >= date) &&
+      !s.special.some((x) => x.date <= date && (x.to || x.date) >= date)).slice(0, 5);
     view.innerHTML =
       '<div class="view__head"><div><h1 tabindex="-1">Hours & closed days</h1>' +
-        '<p class="muted">Store hours drive the “Open now” label and the pickup times customers can choose.</p></div></div>' +
+        '<p class="muted">Store hours drive the “Open now” label and the pickup and delivery times customers can choose. Closed days and special hours override them on those dates.</p></div></div>' +
       '<section class="card" aria-labelledby="hours-title"><h2 id="hours-title">Weekly hours</h2>' +
-        '<div class="hours-grid">' +
+        (owner ? '' : '<p class="muted small">Only the owner can change the weekly hours. Use closed days or special hours below for one-off changes.</p>') +
+        `<fieldset class="hours-grid"${owner ? '' : ' disabled'}><legend class="sr-only">Weekly hours</legend>` +
         WEEK.map((day) => {
           const h = s.hours.find((x) => x.day === day);
           const open = !!(h.open && h.close);
@@ -2037,19 +2458,33 @@
             `<span class="muted small hours-row__sum" data-sum>${open ? `${fmtTime(h.open)} – ${fmtTime(h.close)}` : 'Closed'}</span>` +
             '</fieldset>';
         }).join('') +
-        '</div></section>' +
+        '</fieldset></section>' +
       '<section class="card" aria-labelledby="closed-title"><h2 id="closed-title">Closed days</h2>' +
-        '<p class="muted">Holidays and other days the bakery is closed. Customers can’t pick those days for pickup or delivery.</p>' +
+        '<p class="muted">Holidays and other days the bakery is closed. Customers can’t pick those days for pickup or delivery, and the website says why.</p>' +
         '<form class="inline-form" data-add-closure novalidate>' +
-          `<div class="field"><label for="cl-date">Date</label><input class="input" id="cl-date" type="date" min="${today}" required></div>` +
+          `<div class="field"><label for="cl-date">From</label><input class="input" id="cl-date" type="date" min="${today}" required></div>` +
+          `<div class="field"><label for="cl-to">To <span class="muted">(optional)</span></label><input class="input" id="cl-to" type="date" min="${today}"></div>` +
           '<div class="field grow"><label for="cl-note">Reason <span class="muted">(optional, shown to customers)</span></label><input class="input" id="cl-note" maxlength="80" placeholder="e.g. Thanksgiving"></div>' +
-          `<button type="submit" class="btn btn--primary">${icon('plus')}Add closed day</button>` +
+          `<button type="submit" class="btn btn--primary">${icon('plus')}Add closed days</button>` +
         '</form>' +
+        (hol.length ? `<div class="quick"><span class="muted small">Quick add:</span> ${hol.map(([name, date]) => `<button type="button" class="chip" data-act="add-holiday" data-date="${date}" data-name="${esc(name)}">${esc(name)}${/Eve/.test(name) ? ' (short hours)' : ''} <span class="muted">${esc(fmtRange({ date }))}</span></button>`).join('')}</div>` : '') +
         (s.closures.length
-          ? `<ul class="list">${s.closures.map((c, i) => `<li class="${c.date < today ? 'is-past' : ''}"><span><strong>${esc(fmtDay(c.date))}</strong>${c.note ? ` · ${esc(c.note)}` : ''}${c.date < today ? ' <span class="badge badge--muted">Past</span>' : ''}</span>` +
-              `<button type="button" class="btn btn--quiet btn--sm" data-act="del-closure" data-i="${i}">${icon('trash')}Remove<span class="sr-only"> ${esc(fmtDay(c.date))}</span></button></li>`).join('')}</ul>` +
-            (s.closures.some((c) => c.date < today) ? '<button type="button" class="btn btn--quiet btn--sm" data-act="clear-past">Remove past days</button>' : '')
+          ? `<ul class="list">${listed(s.closures, 'closure')}</ul>` + (s.closures.some((c) => (c.to || c.date) < today) ? '<button type="button" class="btn btn--quiet btn--sm" data-act="clear-past" data-kind="closures">Remove past days</button>' : '')
           : '<p class="empty">No closed days coming up.</p>') +
+      '</section>' +
+      '<section class="card" aria-labelledby="special-title"><h2 id="special-title">Special hours</h2>' +
+        '<p class="muted">Days with different hours, like closing early before a holiday. Pickup and delivery times follow them.</p>' +
+        '<form class="inline-form" data-add-special novalidate>' +
+          `<div class="field"><label for="sp-date">From</label><input class="input" id="sp-date" type="date" min="${today}" required></div>` +
+          `<div class="field"><label for="sp-to">To <span class="muted">(optional)</span></label><input class="input" id="sp-to" type="date" min="${today}"></div>` +
+          '<div class="field"><label for="sp-open">Opens</label><input class="input" id="sp-open" type="time" step="900" value="09:00" required></div>' +
+          '<div class="field"><label for="sp-close">Closes</label><input class="input" id="sp-close" type="time" step="900" value="14:00" required></div>' +
+          '<div class="field grow"><label for="sp-note">Reason <span class="muted">(optional, shown to customers)</span></label><input class="input" id="sp-note" maxlength="80" placeholder="e.g. Christmas Eve"></div>' +
+          `<button type="submit" class="btn btn--primary">${icon('plus')}Add special hours</button>` +
+        '</form>' +
+        (s.special.length
+          ? `<ul class="list">${listed(s.special, 'special')}</ul>` + (s.special.some((x) => (x.to || x.date) < today) ? '<button type="button" class="btn btn--quiet btn--sm" data-act="clear-past" data-kind="special">Remove past days</button>' : '')
+          : '<p class="empty">No special hours coming up.</p>') +
       '</section>';
     main.appendChild(view);
 
@@ -2069,37 +2504,73 @@
     };
     view.addEventListener('change', (e) => {
       const fs = e.target.closest('.hours-row');
-      if (!fs) return;
+      if (!fs || !owner) return;
       rowState(fs);
       changed();
     });
     view.addEventListener('input', (e) => {
       const fs = e.target.closest('.hours-row');
-      if (fs && e.target.type === 'time') { rowState(fs); changed(); }
+      if (fs && owner && e.target.type === 'time') { rowState(fs); changed(); }
     });
+    const readRange = (fromEl, toEl) => {
+      const from = fromEl.value, to = toEl.value;
+      fieldError(fromEl, ''); fieldError(toEl, '');
+      if (!isDate(from)) { fieldError(fromEl, 'Choose a date.'); fromEl.focus(); return null; }
+      if (to && !isDate(to)) { fieldError(toEl, 'Choose a date, or leave it empty.'); toEl.focus(); return null; }
+      if (to && to < from) { fieldError(toEl, 'Must be on or after the first day.'); toEl.focus(); return null; }
+      if (to && daysApart(from, to) > 62) { fieldError(toEl, 'Keep it to two months or less.'); toEl.focus(); return null; }
+      return to && to !== from ? { date: from, to } : { date: from };
+    };
     $('[data-add-closure]', view).addEventListener('submit', (e) => {
       e.preventDefault();
-      const dateEl = $('#cl-date', view);
-      const v = dateEl.value;
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) { fieldError(dateEl, 'Choose a date.'); dateEl.focus(); return; }
-      if (s.closures.some((c) => c.date === v)) { fieldError(dateEl, 'That day is already on the list.'); dateEl.focus(); return; }
-      fieldError(dateEl, '');
-      s.closures.push({ date: v, note: $('#cl-note', view).value.trim() });
+      const r = readRange($('#cl-date', view), $('#cl-to', view));
+      if (!r) return;
+      if (s.closures.some((c) => c.date === r.date && (c.to || '') === (r.to || ''))) { fieldError($('#cl-date', view), 'Those days are already on the list.'); return; }
+      s.closures.push(Object.assign(r, { note: $('#cl-note', view).value.trim() }));
       s.closures.sort((a, b) => (a.date < b.date ? -1 : 1));
       changed({ rerender: true, focus: '#cl-date' });
-      toast(`Added ${fmtDay(v)} as a closed day.`, 'ok');
+      toast(`Added ${fmtRange(r)} as closed.`, 'ok');
+    });
+    $('[data-add-special]', view).addEventListener('submit', (e) => {
+      e.preventDefault();
+      const r = readRange($('#sp-date', view), $('#sp-to', view));
+      if (!r) return;
+      const o = $('#sp-open', view), c = $('#sp-close', view);
+      fieldError(c, '');
+      if (!o.value || !c.value) { fieldError(c, 'Enter both times.'); c.focus(); return; }
+      if (c.value <= o.value) { fieldError(c, 'Must be after the opening time.'); c.focus(); return; }
+      s.special.push(Object.assign(r, { open: o.value, close: c.value, note: $('#sp-note', view).value.trim() }));
+      s.special.sort((a, b) => (a.date < b.date ? -1 : 1));
+      changed({ rerender: true, focus: '#sp-date' });
+      toast(`Added special hours on ${fmtRange(r)}.`, 'ok');
     });
     view.addEventListener('click', (e) => {
       const b = e.target.closest('[data-act]');
       if (!b) return;
-      if (b.getAttribute('data-act') === 'del-closure') {
-        const c = s.closures.splice(Number(b.getAttribute('data-i')), 1)[0];
-        changed({ rerender: true, focus: '#cl-date' });
-        toast(`Removed ${fmtDay(c.date)}.`);
-      } else if (b.getAttribute('data-act') === 'clear-past') {
-        s.closures = s.closures.filter((c) => c.date >= today);
-        changed({ rerender: true, focus: '#cl-date' });
+      const act = b.getAttribute('data-act');
+      if (act === 'del-closure' || act === 'del-special') {
+        const arr = act === 'del-closure' ? s.closures : s.special;
+        const x = arr.splice(Number(b.getAttribute('data-i')), 1)[0];
+        changed({ rerender: true, focus: act === 'del-closure' ? '#cl-date' : '#sp-date' });
+        toast(`Removed ${fmtRange(x)}.`);
+      } else if (act === 'clear-past') {
+        const k = b.getAttribute('data-kind');
+        s[k] = s[k].filter((x) => (x.to || x.date) >= today);
+        changed({ rerender: true, focus: k === 'closures' ? '#cl-date' : '#sp-date' });
         toast('Removed past days.');
+      } else if (act === 'add-holiday') {
+        const date = b.getAttribute('data-date'), name = b.getAttribute('data-name');
+        if (/Eve/.test(name)) {
+          s.special.push({ date, open: '09:00', close: '14:00', note: name });
+          s.special.sort((a, c) => (a.date < c.date ? -1 : 1));
+          changed({ rerender: true, focus: '#sp-date' });
+          toast(`Added ${name}: open 9 AM – 2 PM. Change it in Special hours if you keep other hours.`, 'ok');
+        } else {
+          s.closures.push({ date, note: name });
+          s.closures.sort((a, c) => (a.date < c.date ? -1 : 1));
+          changed({ rerender: true, focus: '#cl-date' });
+          toast(`Added ${name} (${fmtRange({ date })}) as closed.`, 'ok');
+        }
       }
     });
   }
@@ -2108,6 +2579,10 @@
   function viewOrdering(main) {
     const s = state.draft.site;
     const o = s.ordering;
+    const owner = isOwner();
+    const today = todayLA();
+    const link = s.announceLink || null;
+    const pageKey = !link ? '' : SITE_PAGES.some(([k]) => k === link.url) ? link.url : 'custom';
     const view = doc.createElement('div');
     view.className = 'view';
     view.innerHTML =
@@ -2117,10 +2592,26 @@
         '<div class="field"><label for="ann-text">Announcement</label>' +
           `<textarea class="input" id="ann-text" rows="2" maxlength="200" aria-describedby="ann-count">${esc(s.announcement)}</textarea>` +
           `<p class="hint" id="ann-count"><span data-count>${s.announcement.length}</span> of 200 characters</p></div>` +
+        '<div class="grid-2">' +
+          '<div class="field"><label for="ann-page">Link in the bar</label><select class="input" id="ann-page">' +
+            `<option value=""${pageKey === '' ? ' selected' : ''}>Order online (the usual link)</option>` +
+            SITE_PAGES.filter(([k]) => k !== 'order.html').map(([k, l]) => `<option value="${k}"${pageKey === k ? ' selected' : ''}>${esc(l)}</option>`).join('') +
+            `<option value="custom"${pageKey === 'custom' ? ' selected' : ''}>Another web address…</option></select></div>` +
+          `<div class="field" data-link-text-field${pageKey ? '' : ' hidden'}><label for="ann-link-text">Link text</label><input class="input" id="ann-link-text" maxlength="40" value="${esc(link ? link.text : '')}" placeholder="Learn more"></div>` +
+        '</div>' +
+        `<div class="field" data-url-field${pageKey === 'custom' ? '' : ' hidden'}><label for="ann-url">Web address</label><input class="input" id="ann-url" type="url" inputmode="url" maxlength="300" value="${esc(pageKey === 'custom' ? link.url : '')}" placeholder="https://…" aria-describedby="ann-url-hint">` +
+          '<p class="hint" id="ann-url-hint">Must start with https://</p></div>' +
+        '<div class="grid-2">' +
+          `<div class="field"><label for="ann-from">Show from <span class="muted">(optional)</span></label><input class="input" id="ann-from" type="date" value="${esc(s.announceFrom || '')}"></div>` +
+          `<div class="field"><label for="ann-to">Until <span class="muted">(optional, last day shown)</span></label><input class="input" id="ann-to" type="date" value="${esc(s.announceTo || '')}"></div>` +
+        '</div>' +
+        '<p class="hint" data-sched></p>' +
         '<p class="label">Preview</p>' +
-        `<div class="ann-preview" data-preview>${s.announcement ? `${esc(s.announcement)} · <u>Order online</u>` : '<em>The bar is hidden.</em>'}</div>` +
+        '<div class="ann-preview" data-preview></div>' +
       '</section>' +
       '<section class="card" aria-labelledby="ord-title"><h2 id="ord-title">Ordering rules</h2>' +
+        (owner ? '' : '<p class="muted small">Only the owner can change the ordering rules.</p>') +
+        `<fieldset class="plain"${owner ? '' : ' disabled'}><legend class="sr-only">Ordering rules</legend>` +
         '<div class="grid-2">' +
           `<div class="field"><label for="o-cutoff">Order cutoff time</label><input class="input" id="o-cutoff" type="time" step="900" value="${esc(o.cutoff)}" aria-describedby="o-cutoff-hint">` +
             '<p class="hint" id="o-cutoff-hint">Orders placed before this time can be ready the next day.</p></div>' +
@@ -2134,24 +2625,62 @@
         '<fieldset class="field"><legend>Delivery days</legend><div class="checks checks--row">' +
           WEEK.map((d) => `<label class="check"><input type="checkbox" name="o-days" value="${d}"${o.deliveryDays.includes(d) ? ' checked' : ''}><span>${DAY[d]}</span></label>`).join('') +
         '</div><p class="hint" data-days-hint></p></fieldset>' +
-      '</section>';
+        '</fieldset></section>';
     main.appendChild(view);
     const hint = () => {
       $('[data-days-hint]', view).textContent = o.deliveryDays.length ? '' : 'With no delivery days, customers can only choose pickup.';
     };
+    const readLink = () => {
+      const page = $('#ann-page', view).value;
+      $('[data-link-text-field]', view).hidden = !page;
+      $('[data-url-field]', view).hidden = page !== 'custom';
+      const textIn = $('#ann-link-text', view).value.trim();
+      if (!page) { delete s.announceLink; return; }
+      const url = page === 'custom' ? $('#ann-url', view).value.trim() : page;
+      const label = page === 'custom' ? '' : (SITE_PAGES.find(([k]) => k === page) || [])[1];
+      s.announceLink = { url, text: textIn || label || 'Learn more' };
+      const urlEl = $('#ann-url', view);
+      fieldError(urlEl, page === 'custom' && url && !safeLink(url) ? 'Use an address that starts with https://' : '');
+    };
+    const drawPreview = () => {
+      const text = String(s.announcement || '').trim();
+      const l = s.announceLink;
+      const linkText = l && l.url ? (l.text || 'Learn more') : 'Order online';
+      $('[data-preview]', view).innerHTML = text ? `${esc(text)} · <u>${esc(linkText)}</u>` : '<em>The bar is hidden.</em>';
+      const from = s.announceFrom, to = s.announceTo;
+      let sched = '';
+      if (text && (from || to)) {
+        if (to && to < today) sched = 'These dates are over, so the bar isn’t showing now.';
+        else if (from && from > today) sched = `The bar starts showing on ${fmtRange({ date: from })}${to ? ` and ends after ${fmtRange({ date: to })}` : ''}.`;
+        else sched = to ? `Showing now, until the end of ${fmtRange({ date: to })}.` : 'Showing now.';
+      }
+      $('[data-sched]', view).textContent = sched;
+      fieldError($('#ann-to', view), from && to && to < from ? 'Must be on or after the first day.' : '');
+    };
     hint();
+    drawPreview();
     view.addEventListener('input', (e) => {
       const t = e.target;
       if (t.id === 'ann-text') {
         s.announcement = t.value.replace(/\s+/g, ' ');
         $('[data-count]', view).textContent = t.value.length;
-        $('[data-preview]', view).innerHTML = s.announcement.trim() ? `${esc(s.announcement.trim())} · <u>Order online</u>` : '<em>The bar is hidden.</em>';
-        changed();
-      }
+      } else if (t.id === 'ann-link-text' || t.id === 'ann-url') {
+        readLink();
+      } else return;
+      drawPreview();
+      changed();
     });
     view.addEventListener('change', (e) => {
       const t = e.target;
-      if (t.id === 'o-cutoff') {
+      if (t.id === 'ann-page') {
+        readLink();
+        if (t.value === 'custom') $('#ann-url', view).focus();
+      } else if (t.id === 'ann-from' || t.id === 'ann-to') {
+        const k = t.id === 'ann-from' ? 'announceFrom' : 'announceTo';
+        if (t.value) s[k] = t.value; else delete s[k];
+      } else if (!owner) {
+        return;
+      } else if (t.id === 'o-cutoff') {
         if (!/^\d{2}:\d{2}$/.test(t.value)) { fieldError(t, 'Enter a time.'); return; }
         fieldError(t, '');
         o.cutoff = t.value;
@@ -2167,6 +2696,7 @@
         o.deliveryDays = $$('input[name="o-days"]:checked', view).map((x) => Number(x.value)).sort();
         hint();
       } else return;
+      drawPreview();
       changed();
     });
   }
@@ -2474,9 +3004,11 @@
         return;
       }
       box.innerHTML = `<ul class="list">${list.map((v, i) => `<li><span><strong>Version ${v.version}</strong>${i === 0 ? ' <span class="badge badge--ok">Live now</span>' : ''}` +
-        `<br><span class="muted small">${esc(fmtStamp(v.savedAt))}${v.note ? ` · ${esc(v.note)}` : ''}</span></span>` +
+        `<br><span class="muted small">${esc(fmtStamp(v.savedAt))}${v.by ? ` · by ${esc(v.by)}` : ''}${v.note ? ` · ${esc(v.note)}` : ''}</span></span>` +
+        '<span class="btn-row btn-row--tight">' +
+        `<button type="button" class="btn btn--quiet btn--sm" data-act="what" data-v="${v.version}" data-prev="${list[i + 1] ? list[i + 1].version : ''}">What changed<span class="sr-only"> in version ${v.version}</span></button>` +
         (i === 0 ? '' : `<button type="button" class="btn btn--quiet btn--sm" data-act="restore" data-v="${v.version}">${icon('history')}Restore<span class="sr-only"> version ${v.version}</span></button>`) +
-        '</li>').join('')}</ul>`;
+        '</span></li>').join('')}</ul>`;
     }).catch((ex) => {
       box.removeAttribute('aria-busy');
       box.innerHTML = `<p class="form-error">${esc(ex.message)}</p>`;
@@ -2485,7 +3017,26 @@
       const b = e.target.closest('[data-act]');
       if (!b) return;
       const act = b.getAttribute('data-act');
-      if (act === 'restore') {
+      if (act === 'what') {
+        const v = Number(b.getAttribute('data-v'));
+        const prev = Number(b.getAttribute('data-prev')) || 0;
+        b.disabled = true;
+        try {
+          const cur = await state.backend.getVersion(v);
+          const before = prev ? (await state.backend.getVersion(prev)).doc : clone(state.original);
+          const lines = describeChanges(normalized(withWholesale(before)), normalized(withWholesale(cur.doc)));
+          openDialog({
+            title: `What changed in version ${v}`, size: 'md', closeOnBackdrop: true,
+            body: `<p class="muted small">${esc(fmtStamp(cur.savedAt))}${cur.by ? ` · by ${esc(cur.by)}` : ''}${cur.note ? ` · ${esc(cur.note)}` : ''}${prev ? ` · compared with version ${prev}` : ' · compared with the website’s original menu'}</p>` +
+              (lines.length ? `<ul class="change-list">${lines.slice(0, 40).map((l) => `<li>${esc(l)}</li>`).join('')}${lines.length > 40 ? `<li>…and ${lines.length - 40} more</li>` : ''}</ul>` : '<p>Nothing visible changed (it was published again as it was).</p>'),
+            foot: '<button type="button" class="btn btn--primary" data-dlg-close>Close</button>',
+          });
+        } catch (ex) {
+          if (ex.code === 'signed_out') handleSaveError(ex); else toast(ex.message, 'error');
+        } finally {
+          b.disabled = false;
+        }
+      } else if (act === 'restore') {
         const v = Number(b.getAttribute('data-v'));
         const ok = await ask({
           title: `Restore version ${v}?`, ok: 'Restore and publish',
@@ -2498,7 +3049,7 @@
           await state.backend.preload([res.doc]);
           state.published = { version: res.version, savedAt: res.savedAt, doc: res.doc };
           state.draft = clone(res.doc);
-          store.del(DRAFT_KEY);
+          store.del(DRAFT_KEY());
           changed({ rerender: true, focus: 'h1' });
           toast(`Restored version ${v}. It’s live now.`, 'ok');
         } catch (ex) {
@@ -2546,58 +3097,177 @@
     });
   }
 
-  /* ------------------------------------------------------------------ login and security */
+  /* ------------------------------------------------------------------ logins and security */
   function viewSecurity(main) {
     const test = state.backend.kind === 'local';
+    const owner = isOwner();
     const view = doc.createElement('div');
     view.className = 'view';
+    const passForm = '<form class="pass-form" data-pass-form novalidate>' +
+      '<div class="grid-2">' +
+        '<div class="field"><label for="pw-cur">Current passcode</label><input class="input" id="pw-cur" type="password" autocomplete="current-password" maxlength="200"></div>' +
+        '<div class="field"><label for="pw-new">New passcode</label><input class="input" id="pw-new" type="password" autocomplete="new-password" maxlength="200" aria-describedby="pw-hint"></div>' +
+      '</div>' +
+      '<p class="hint" id="pw-hint">At least 12 characters. A few words and a number work well, like <em>maple-rye-sunrise-42</em>. Other devices will need to log in again.</p>' +
+      '<p class="form-error" data-pw-error role="alert" hidden></p>' +
+      `<button type="submit" class="btn btn--primary">${icon('lock')}Change my passcode</button></form>`;
     view.innerHTML =
-      '<div class="view__head"><div><h1 tabindex="-1">Login & security</h1></div></div>' +
+      '<div class="view__head"><div><h1 tabindex="-1">Logins & security</h1></div></div>' +
       (test
         ? '<section class="card"><h2>Test mode</h2>' +
-            `<p>You’re using test mode on this computer (username <code>${TEST_USER}</code>, passcode <code>${TEST_PASS}</code>). It only saves in this browser. The live panel uses the username and passcode you set in Cloudflare, and it won’t accept a passcode shorter than 12 characters.</p>` +
-            `<label class="switch"><input type="checkbox" data-act="preview"${localBackend.previewOn() ? ' checked' : ''}><span>Show published test changes on this copy of the website</span></label>` +
+            `<p>You’re using test mode on this computer as <strong>${esc(state.user)}</strong> (${owner ? 'owner' : 'staff'}). It only saves in this browser. Log in as <code>${TEST_USER}</code> / <code>${TEST_PASS}</code> for the owner, or <code>staff</code> / <code>${TEST_PASS}</code> to see what staff can do. The live panel uses real passcodes of at least 12 characters.</p>` +
+            `<label class="switch"><input type="checkbox" data-act="preview-test"${localBackend.previewOn() ? ' checked' : ''}><span>Show published test changes on this copy of the website</span></label>` +
             `<p class="btn-row"><button type="button" class="btn btn--danger-quiet" data-act="reset-test">${icon('trash')}Reset test data</button></p></section>`
-        : '<section class="card"><h2>Your login</h2>' +
-            `<p>Logged in as <strong>${esc(state.user)}</strong>. Logins end after 60 minutes without activity, or after 8 hours.</p>` +
-            '<p>To change the username or passcode, double-click <strong>Set admin passcode</strong> in the boule-de-pain-admin folder. Changing it logs everyone out.</p>' +
-            `<p class="btn-row"><button type="button" class="btn btn--quiet" data-act="logout-all">${icon('logout')}Log out on all devices</button></p></section>` +
-          '<section class="card" aria-labelledby="act-title"><h2 id="act-title">Recent activity</h2><div data-activity aria-busy="true"><p class="muted">Loading…</p></div></section>') +
+        : `<section class="card" aria-labelledby="me-title"><h2 id="me-title">Your login</h2>` +
+            `<p>Logged in as <strong>${esc(state.user)}</strong> (${owner ? 'owner' : 'staff'}). Logins end after 60 minutes without activity, or after 8 hours.</p>` +
+            passForm +
+            (owner ? '<p class="muted small">Forgot the owner passcode? Whoever manages the website can set a new one with “Set admin passcode” (that logs everyone out).</p>' : '') +
+          '</section>' +
+          (owner
+            ? '<section class="card" aria-labelledby="staff-title"><h2 id="staff-title">Staff logins</h2>' +
+                '<p class="muted">Staff can mark items sold out (or sold out today), add closed days and special hours, and change the announcement. They can’t change prices, the menu, or anything else, and every change shows who made it.</p>' +
+                '<div data-users aria-busy="true"><p class="muted">Loading…</p></div>' +
+                '<form class="inline-form" data-add-user novalidate>' +
+                  '<div class="field"><label for="u-name">Username</label><input class="input" id="u-name" maxlength="40" autocapitalize="none" spellcheck="false" placeholder="e.g. counter"></div>' +
+                  '<div class="field grow"><label for="u-pass">Passcode for them</label><input class="input" id="u-pass" type="text" autocomplete="off" spellcheck="false" maxlength="200" placeholder="at least 12 characters"></div>' +
+                  `<button type="submit" class="btn btn--primary">${icon('plus')}Add staff login</button>` +
+                '</form><p class="form-error" data-user-error role="alert" hidden></p></section>' +
+              '<section class="card" aria-labelledby="dev-title"><h2 id="dev-title">Who’s logged in</h2><div data-sessions aria-busy="true"><p class="muted">Loading…</p></div>' +
+                `<p class="btn-row"><button type="button" class="btn btn--quiet" data-act="logout-all">${icon('logout')}Log out on all devices</button></p>` +
+                '<p class="muted small">Use this if a phone or computer is lost. Everyone logs in again, and every device has to prove itself again.</p></section>' +
+              '<section class="card" aria-labelledby="act-title"><h2 id="act-title">Recent activity</h2><div data-activity aria-busy="true"><p class="muted">Loading…</p></div></section>'
+            : '')) +
       '<section class="card"><h2>How the panel is protected</h2><ul class="bullets">' +
-        '<li>The passcode is checked on the server and never stored in the website files.</li>' +
-        '<li>After 5 wrong tries, logins from that network are locked for 15 minutes, and longer each time it happens again.</li>' +
+        '<li>Passcodes are checked on the server and never stored in the website files.</li>' +
+        '<li>After 5 wrong tries, logins from that network are locked for 15 minutes, and longer each time it happens again. Phones and computers that have logged in before have their own limit, so other people’s wrong tries can’t lock you out.</li>' +
         '<li>Your login is kept in a secure cookie that scripts can’t read, and it ends on its own.</li>' +
-        '<li>Changes are only accepted from this panel, and every change is checked before it’s saved.</li>' +
+        '<li>Changes are only accepted from this panel, and every change is checked before it’s saved, including what staff are allowed to change.</li>' +
         '<li>Photos must be real JPG, PNG or WebP images.</li>' +
       '</ul><p class="muted small">Use a long passcode that you don’t use anywhere else, and don’t share it by text or email.</p></section>';
     main.appendChild(view);
-    const box = $('[data-activity]', view);
-    if (box) {
-      const LABELS = { login: 'Logged in', login_failed: 'Wrong passcode', login_blocked: 'Login blocked (too many tries)', publish: 'Published', photo_upload: 'Photo uploaded', logout_all: 'Logged out everywhere' };
-      state.backend.activity().then((r) => {
+
+    const LABELS = { login: 'Logged in', login_failed: 'Wrong passcode', login_blocked: 'Login blocked (too many tries)', publish: 'Published', restore: 'Restored an older version',
+      photo_upload: 'Photo uploaded', logout_all: 'Logged out everywhere', password: 'Changed their passcode', user_add: 'Added a staff login',
+      user_update: 'Gave a staff login a new passcode', user_remove: 'Removed a staff login' };
+    const agentName = (a) => {
+      const s = String(a || '');
+      const os = /iPhone|iPad/.test(s) ? 'iPhone/iPad' : /Android/.test(s) ? 'Android' : /Mac OS X|Macintosh/.test(s) ? 'Mac' : /Windows/.test(s) ? 'Windows' : /Linux/.test(s) ? 'Linux' : 'Device';
+      const br = /Edg\//.test(s) ? 'Edge' : /Chrome\//.test(s) ? 'Chrome' : /Firefox\//.test(s) ? 'Firefox' : /Safari\//.test(s) ? 'Safari' : '';
+      return br ? `${br} on ${os}` : os;
+    };
+    const drawUsers = async () => {
+      const box = $('[data-users]', view);
+      if (!box) return;
+      try {
+        const users = await state.backend.users();
+        box.removeAttribute('aria-busy');
+        box.innerHTML = users.length
+          ? `<ul class="list">${users.map((u) => `<li><span><strong>${esc(u.name)}</strong><br><span class="muted small">${u.lastLogin ? `Last logged in ${esc(fmtStamp(u.lastLogin))}` : 'Never logged in'}</span></span>` +
+              `<span class="btn-row btn-row--tight"><button type="button" class="btn btn--quiet btn--sm" data-act="user-pass" data-name="${esc(u.name)}">New passcode<span class="sr-only"> for ${esc(u.name)}</span></button>` +
+              `<button type="button" class="btn btn--danger-quiet btn--sm" data-act="user-del" data-name="${esc(u.name)}">Remove<span class="sr-only"> ${esc(u.name)}</span></button></span></li>`).join('')}</ul>`
+          : '<p class="empty">No staff logins yet.</p>';
+      } catch (ex) { box.removeAttribute('aria-busy'); box.innerHTML = `<p class="form-error">${esc(ex.message)}</p>`; }
+    };
+    const drawActivity = async () => {
+      const box = $('[data-activity]', view), sbox = $('[data-sessions]', view);
+      if (!box) return;
+      try {
+        const r = await state.backend.activity();
         box.removeAttribute('aria-busy');
         box.innerHTML = r.events.length
-          ? `<table class="table"><thead><tr><th scope="col">When</th><th scope="col">What</th><th scope="col">Network</th></tr></thead><tbody>${r.events.map((ev) =>
-            `<tr class="${ev.action === 'login_failed' || ev.action === 'login_blocked' ? 'is-warn' : ''}"><td>${esc(fmtStamp(ev.at))}</td><td>${esc(LABELS[ev.action] || ev.action)}${ev.detail ? ` · ${esc(ev.detail)}` : ''}</td><td><code>${esc(ev.ip)}</code></td></tr>`).join('')}</tbody></table>`
+          ? `<table class="table"><thead><tr><th scope="col">When</th><th scope="col">Who</th><th scope="col">What</th><th scope="col">Network</th></tr></thead><tbody>${r.events.map((ev) =>
+            `<tr class="${ev.action === 'login_failed' || ev.action === 'login_blocked' ? 'is-warn' : ''}"><td>${esc(fmtStamp(ev.at))}</td><td>${esc(ev.user || '')}</td><td>${esc(LABELS[ev.action] || ev.action)}${ev.detail ? ` · ${esc(ev.detail)}` : ''}</td><td><code>${esc(ev.ip)}</code></td></tr>`).join('')}</tbody></table>`
           : '<p class="empty">No activity yet.</p>';
-      }).catch((ex) => { box.removeAttribute('aria-busy'); box.innerHTML = `<p class="form-error">${esc(ex.message)}</p>`; });
-    }
+        if (sbox) {
+          sbox.removeAttribute('aria-busy');
+          sbox.innerHTML = r.sessions.length
+            ? `<ul class="list">${r.sessions.map((x) => `<li><span><strong>${esc(x.user)}</strong>${x.current ? ' <span class="badge badge--ok">This device</span>' : ''}<br>` +
+                `<span class="muted small">${esc(agentName(x.agent))} · active ${esc(fmtStamp(x.lastSeen))} · <code>${esc(x.ip || '')}</code></span></span></li>`).join('')}</ul>`
+            : '<p class="empty">Nobody else is logged in.</p>';
+        }
+      } catch (ex) {
+        box.removeAttribute('aria-busy'); box.innerHTML = `<p class="form-error">${esc(ex.message)}</p>`;
+        if (sbox) { sbox.removeAttribute('aria-busy'); sbox.innerHTML = ''; }
+      }
+    };
+    if (!test && owner) { drawUsers(); drawActivity(); }
+
+    const passFormEl = $('[data-pass-form]', view);
+    if (passFormEl) passFormEl.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const cur = $('#pw-cur', view), nxt = $('#pw-new', view), err = $('[data-pw-error]', view);
+      err.hidden = true;
+      fieldError(cur, cur.value ? '' : 'Enter your current passcode.');
+      fieldError(nxt, nxt.value.length >= 12 ? '' : 'Use at least 12 characters.');
+      if (!cur.value) { cur.focus(); return; }
+      if (nxt.value.length < 12) { nxt.focus(); return; }
+      const btn = $('button[type="submit"]', passFormEl);
+      btn.disabled = true;
+      try {
+        await state.backend.changePassword(cur.value, nxt.value);
+        cur.value = ''; nxt.value = '';
+        toast('Passcode changed. Other devices will need to log in again.', 'ok');
+      } catch (ex) {
+        if (ex.code === 'signed_out') { handleSaveError(ex); return; }
+        err.textContent = ex.message; err.hidden = false;
+      } finally { btn.disabled = false; }
+    });
+    const addUser = $('[data-add-user]', view);
+    if (addUser) addUser.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const nameEl = $('#u-name', view), passEl = $('#u-pass', view), err = $('[data-user-error]', view);
+      err.hidden = true;
+      const name = nameEl.value.trim().toLowerCase();
+      if (!/^[a-z0-9][a-z0-9._-]{1,39}$/.test(name)) { fieldError(nameEl, 'Use 2 to 40 letters or numbers, no spaces.'); nameEl.focus(); return; }
+      fieldError(nameEl, '');
+      if (passEl.value.length < 12) { fieldError(passEl, 'Use at least 12 characters.'); passEl.focus(); return; }
+      fieldError(passEl, '');
+      try {
+        await state.backend.saveUser(name, passEl.value);
+        toast(`Added the staff login “${name}”. Give them the passcode in person.`, 'ok');
+        nameEl.value = ''; passEl.value = '';
+        drawUsers(); drawActivity();
+      } catch (ex) {
+        if (ex.code === 'signed_out') { handleSaveError(ex); return; }
+        err.textContent = ex.message; err.hidden = false;
+      }
+    });
     view.addEventListener('click', async (e) => {
       const b = e.target.closest('[data-act]');
       if (!b) return;
       const act = b.getAttribute('data-act');
       if (act === 'logout-all') {
-        const ok = await ask({ title: 'Log out on all devices?', text: 'Everyone using the admin panel, including you, will need to log in again.', ok: 'Log out everywhere', danger: true });
+        const ok = await ask({ title: 'Log out on all devices?', text: 'Everyone using the admin panel, including you, will need to log in again, and every phone or computer counts as new until it does. Use this if a device is lost.', ok: 'Log out everywhere', danger: true });
         if (!ok) return;
         try { await state.backend.logoutAll(); } catch (ex) { /* ignore */ }
-        if (isDirty()) store.trySet(DRAFT_KEY, { base: state.published.version, savedAt: Date.now(), doc: state.draft });
+        if (isDirty()) store.trySet(DRAFT_KEY(), { base: state.published.version, savedAt: Date.now(), doc: state.draft });
         state.draft = null;
         renderLogin({ message: 'You’re logged out on all devices.' });
+      } else if (act === 'user-del') {
+        const name = b.getAttribute('data-name');
+        const ok = await ask({ title: `Remove “${name}”?`, text: 'They’re logged out right away and can’t log in again.', ok: 'Remove login', danger: true });
+        if (!ok) return;
+        try { await state.backend.removeUser(name); toast(`Removed “${name}”.`); drawUsers(); drawActivity(); } catch (ex) { toast(ex.message, 'error'); }
+      } else if (act === 'user-pass') {
+        const name = b.getAttribute('data-name');
+        const dlg = openDialog({
+          title: `New passcode for “${name}”`, size: 'sm', focus: '#up-pass',
+          body: '<div class="field"><label for="up-pass">New passcode</label><input class="input" id="up-pass" type="text" autocomplete="off" spellcheck="false" maxlength="200" placeholder="at least 12 characters"></div>' +
+            '<p class="hint">They’re logged out and use the new passcode next time.</p><p class="form-error" data-up-error role="alert" hidden></p>',
+          foot: '<button type="button" class="btn btn--quiet" data-dlg-close>Cancel</button><button type="submit" class="btn btn--primary">Save passcode</button>',
+          onSubmit: async (d) => {
+            const inp = $('#up-pass', d.box), err = $('[data-up-error]', d.box);
+            if (inp.value.length < 12) { fieldError(inp, 'Use at least 12 characters.'); inp.focus(); return; }
+            try { await state.backend.saveUser(name, inp.value); d.close(true); toast(`New passcode saved for “${name}”.`, 'ok'); drawActivity(); }
+            catch (ex) { err.textContent = ex.message; err.hidden = false; }
+          },
+        });
+        return dlg;
       } else if (act === 'reset-test') {
         const ok = await ask({ title: 'Reset test data?', text: 'All test changes, history and photos in this browser are deleted. The live website isn’t affected.', ok: 'Reset test data', danger: true });
         if (!ok) return;
         await localBackend.reset();
-        store.del(DRAFT_KEY);
+        store.del(DRAFT_KEY());
         await startApp();
         state.tab = 'security';
         renderTab('h1');
@@ -2605,7 +3275,7 @@
       }
     });
     view.addEventListener('change', (e) => {
-      if (e.target.getAttribute('data-act') === 'preview') {
+      if (e.target.getAttribute('data-act') === 'preview-test') {
         localBackend.setPreview(e.target.checked);
         toast(e.target.checked ? 'This copy of the website shows your published test changes.' : 'This copy of the website shows the menu from its files.');
       }
@@ -2616,8 +3286,9 @@
   async function startTestMode() {
     state.backend = localBackend;
     state.siteUrl = 'index.html';
-    state.user = TEST_USER;
     const s = await localBackend.session();
+    state.user = s.user || TEST_USER;
+    state.role = s.role || 'owner';
     if (s.authenticated) await startApp(); else renderLogin();
   }
 
@@ -2629,6 +3300,7 @@
         const s = await serverBackend.session();
         state.siteUrl = s.siteUrl || '';
         state.user = s.user || '';
+        state.role = s.role || 'owner';
         if (s.authenticated) await startApp(); else renderLogin({ setup: s.setup });
         return;
       }
@@ -2646,7 +3318,16 @@
     const r = await origLogin(u, p);
     const s = await serverBackend.session();
     state.user = s.user || u;
+    state.role = s.role || 'owner';
     state.siteUrl = s.siteUrl || state.siteUrl;
+    return r;
+  };
+  const origLocalLogin = localBackend.login;
+  localBackend.login = async (u, p) => {
+    const r = await origLocalLogin.call(localBackend, u, p);
+    const s = await localBackend.session();
+    state.user = s.user || TEST_USER;
+    state.role = s.role || 'owner';
     return r;
   };
 

@@ -62,8 +62,12 @@
   function hoursForDay(day) {
     return (SITE.hours || []).find(function (h) { return h.day === day; }) || null;
   }
+  /* Opening hours on a date: closed days and special hours (both set in the admin panel) come first. */
   function hoursFor(d) {
-    if ((SITE.closedDates || []).indexOf(isoDate(d)) > -1) return null;
+    var iso = isoDate(d);
+    if ((SITE.closedDates || []).indexOf(iso) > -1) return null;
+    var sp = (SITE.specialHours || {})[iso];
+    if (sp && sp.open && sp.close) return { open: toMin(sp.open), close: toMin(sp.close), special: true, note: sp.note || '' };
     var h = hoursForDay(d.getUTCDay());
     return h && h.open && h.close ? { open: toMin(h.open), close: toMin(h.close) } : null;
   }
@@ -76,11 +80,12 @@
     var n = nowLocal();
     var today = hoursFor(n.date);
     var note = today ? '' : closureNote(n.date);
+    var why = today && today.special && today.note ? ' (' + today.note + ')' : '';
     if (today && n.minutes >= today.open && n.minutes < today.close) {
       var left = today.close - n.minutes;
-      return { open: true, text: left <= 60 ? 'Open · closes soon (' + fmtTime(today.close) + ')' : 'Open now · until ' + fmtTime(today.close) };
+      return { open: true, text: (left <= 60 ? 'Open · closes soon (' + fmtTime(today.close) + ')' : 'Open now · until ' + fmtTime(today.close)) + why };
     }
-    if (today && n.minutes < today.open) return { open: false, text: 'Closed · opens today at ' + fmtTime(today.open) };
+    if (today && n.minutes < today.open) return { open: false, text: 'Closed · opens today at ' + fmtTime(today.open) + why };
     var label = note ? 'Closed today (' + note + ')' : 'Closed';
     for (var i = 1; i <= 14; i++) {
       var d = addDays(n.date, i), h = hoursFor(d);
@@ -176,12 +181,56 @@
     });
     $$('[data-hours-inline]').forEach(function (el) { el.textContent = hoursText('inline').join('; '); });
   }
+  /* The announcement bar: its text, the dates it shows (optional) and its link (optional), from the admin panel. */
+  function safeLink(url) {
+    var s = String(url || '').trim();
+    if (/^[a-z0-9-]+\.html(#[a-z0-9-]{1,40})?$/.test(s)) return s;
+    try { var u = new URL(s); return u.protocol === 'https:' ? u.href : ''; } catch (e) { return ''; }
+  }
   function renderAnnouncement() {
-    var text = String(SITE.announcement || '').trim();
+    var day = isoDate(nowLocal().date);
+    var showing = (!SITE.announceFrom || day >= SITE.announceFrom) && (!SITE.announceTo || day <= SITE.announceTo);
+    var text = showing ? String(SITE.announcement || '').trim() : '';
+    var link = SITE.announceLink && safeLink(SITE.announceLink.url);
     $$('[data-announce]').forEach(function (bar) {
       bar.hidden = !text;
       var t = $('[data-announce-text]', bar);
       if (t && text) t.textContent = text;
+      var a = $('a', bar);
+      if (!a) return;
+      if (!a.hasAttribute('data-default-href')) {
+        a.setAttribute('data-default-href', a.getAttribute('href') || '');
+        a.setAttribute('data-default-text', a.textContent);
+      }
+      var external = !!link && /^https:/.test(link);
+      a.setAttribute('href', link || a.getAttribute('data-default-href'));
+      a.textContent = link ? (SITE.announceLink.text || 'Learn more') : a.getAttribute('data-default-text');
+      if (external) { a.target = '_blank'; a.rel = 'noopener'; } else { a.removeAttribute('target'); a.removeAttribute('rel'); }
+    });
+  }
+  /* Upcoming closed days and special hours, under the weekly hours (contact page). */
+  function renderSpecialHours() {
+    var boxes = $$('[data-hours-special]');
+    if (!boxes.length) return;
+    var today = isoDate(nowLocal().date);
+    var fmt = function (iso) { return fmtDate(parseISO(iso)); };
+    var span = function (x) { return x.to && x.to !== x.date ? fmt(x.date) + ' – ' + fmt(x.to) : fmtDate(parseISO(x.date), { weekday: 'long' }); };
+    var rows = [];
+    (SITE.closures || []).forEach(function (c) {
+      if (c && (c.to || c.date) >= today) rows.push({ date: c.date, text: span(c), time: 'Closed', note: c.note });
+    });
+    (SITE.special || []).forEach(function (x) {
+      if (x && (x.to || x.date) >= today) rows.push({ date: x.date, text: span(x), time: fmtTime(toMin(x.open)) + ' – ' + fmtTime(toMin(x.close)), note: x.note });
+    });
+    rows.sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
+    rows = rows.slice(0, 8);
+    boxes.forEach(function (box) {
+      box.hidden = !rows.length;
+      var list = $('ul', box);
+      if (!list) return;
+      list.innerHTML = rows.map(function (r) {
+        return '<li><span class="hours__day">' + esc(r.text) + (r.note ? ' <small>' + esc(r.note) + '</small>' : '') + '</span><span class="hours__time">' + esc(r.time) + '</span></li>';
+      }).join('');
     });
   }
 
@@ -194,15 +243,17 @@
     }
     return WIX + ref + '/v1/fill/w_' + w + ',h_' + h + ',al_c,q_80,usm_0.66_1.00_0.01,enc_auto/' + String(ref).replace(/~/g, '_');
   }
+  /* Data published in the admin panel (live, saved in this browser, or already copied into the website files). */
   function liveData() {
     var live = window.BDP_LIVE;
-    return live && live.source !== 'files' && live.menu ? live : null;
+    return live && live.published && live.menu ? live : null;
   }
 
   /* Wholesale page as published in the admin panel */
   function renderWholesale() {
     var ws = SITE.wholesale;
-    if (!liveData() || !ws || typeof ws !== 'object' || !$('[data-ws-intro]')) return;
+    var live = window.BDP_LIVE;
+    if (!live || !live.published || !ws || typeof ws !== 'object' || !$('[data-ws-intro]')) return;
     var list = function (v) { return Array.isArray(v) ? v : []; };
     $$('[data-ws-intro]').forEach(function (el) { el.textContent = ws.intro || ''; });
     $$('[data-ws-categories]').forEach(function (grid) {
@@ -262,7 +313,8 @@
 
   /* Farmers markets as published in the admin panel */
   function renderMarketsLive() {
-    if (!liveData() || !Array.isArray(SITE.markets)) return;
+    var live = window.BDP_LIVE;
+    if (!live || !live.published || !Array.isArray(SITE.markets)) return;
     var markets = SITE.markets.slice().sort(function (a, b) { return WEEK.indexOf(a.day) - WEEK.indexOf(b.day); });
     var count = markets.reduce(function (n, m) { return n + m.locations.length; }, 0);
     $$('[data-market-count]').forEach(function (el) { el.textContent = String(count); });
@@ -958,6 +1010,7 @@
   /* ---------- Boot ---------- */
   function boot() {
     renderAnnouncement();
+    renderSpecialHours();
     renderHeaderHours();
     renderRules();
     renderMarketsLive();
@@ -979,7 +1032,7 @@
     initScrollUI();
     initThanks();
     $$('[data-year]').forEach(function (el) { el.textContent = String(nowLocal().date.getUTCFullYear()); });
-    setInterval(function () { renderStatus(); renderMarkets(); }, 60 * 1000);
+    setInterval(function () { renderStatus(); renderMarkets(); renderAnnouncement(); }, 60 * 1000);
   }
 
   window.BDP = {

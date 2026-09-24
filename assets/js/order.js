@@ -90,7 +90,7 @@
     /* ---------- Menu rendering ---------- */
     function badges(it) {
       var b = [];
-      if (it.soldOut) b.push(['badge--sold', 'Sold out']);
+      if (it.soldOut) b.push(['badge--sold', it.soldOutToday ? 'Sold out today' : 'Sold out']);
       if (it.popular) b.push(['badge--pop', 'Bestseller']);
       (it.labels || []).forEach(function (l) { b.push(['badge--spice', l + ' spice']); });
       if (it.sizes) b.push(['', it.sizes.length + ' sizes']);
@@ -448,8 +448,7 @@
       qty = preset.qty || 1;
       var box = $('[data-item-body]', iForm);
       var mode = currentMode();
-      box.innerHTML =
-        (it.img && imgUrl(it.img, 960, 600) ? '<img class="modal__img" src="' + esc(imgUrl(it.img, 960, 600)) + '" width="960" height="600" alt="">' : '') +
+      box.innerHTML = photosHTML(it) +
         '<div class="modal__inner">' +
           '<div class="modal__dispatch">' + icon(mode === 'delivery' ? 'truck' : 'store') +
             '<span>' + (dispatch ? (mode === 'delivery' ? 'Delivery' : 'Pickup') + ' · ' + esc(T.fmtDate(T.parseISO(dispatch.date))) + ' · ' + esc(dispatch.time) : '') + '</span>' +
@@ -480,6 +479,19 @@
       var ctxLabel = it.catName.replace(/\s+\d+ days in advance$/i, '') + (it.section ? ' · ' + it.section : '');
       setContext((pending && pending.stepped ? 'Step 2 of 2 · ' : '') + ctxLabel);
       showModalStep('item');
+    }
+    /* The item's photo, and small buttons to see its other photos (added in the admin panel). */
+    function photosHTML(it) {
+      var photos = (it.img ? [{ img: it.img, alt: it.alt || '' }] : []).concat(it.more || []).filter(function (p) {
+        return p && p.img && imgUrl(p.img, 960, 600);
+      });
+      if (!photos.length) return '';
+      var main = '<img class="modal__img" data-modal-img src="' + esc(imgUrl(photos[0].img, 960, 600)) + '" width="960" height="600" alt="' + esc(photos[0].alt || '') + '">';
+      if (photos.length < 2) return main;
+      return main + '<div class="modal__thumbs" role="group" aria-label="Photos of ' + esc(it.name) + '">' + photos.map(function (p, i) {
+        return '<button type="button" class="modal__thumb" data-photo="' + i + '" data-src="' + esc(imgUrl(p.img, 960, 600)) + '" data-alt="' + esc(p.alt || '') + '" aria-pressed="' + (i === 0) + '">' +
+          '<img src="' + esc(imgUrl(p.img, 240, 240)) + '" width="56" height="56" alt=""><span class="sr-only">Photo ' + (i + 1) + ' of ' + photos.length + (p.alt ? ': ' + esc(p.alt) : '') + '</span></button>';
+      }).join('') + '</div>';
     }
     function renderGroups(it, sizeName, picks) {
       var wrap = $('[data-addon-groups]', iForm);
@@ -545,6 +557,13 @@
         updateItemTotal();
       });
       iForm.addEventListener('click', function (e) {
+        var thumb = e.target.closest('[data-photo]');
+        if (thumb) {
+          var big = $('[data-modal-img]', iForm);
+          if (big) { big.src = thumb.getAttribute('data-src'); big.alt = thumb.getAttribute('data-alt') || ''; }
+          $$('[data-photo]', iForm).forEach(function (b) { b.setAttribute('aria-pressed', String(b === thumb)); });
+          return;
+        }
         if (e.target.closest('[data-q-inc]')) { qty = Math.min(99, qty + 1); }
         else if (e.target.closest('[data-q-dec]')) { qty = Math.max(1, qty - 1); }
         else return;

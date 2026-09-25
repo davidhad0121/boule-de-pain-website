@@ -1325,6 +1325,8 @@
   function toastUndo(message, snapshot) {
     const region = $('.toasts');
     if (!region) return;
+    // Only the latest change can be undone (an older Undo would also take back everything done since).
+    $$('.toast', region).forEach((old) => { if (old.querySelector('button')) old.remove(); });
     const t = doc.createElement('div');
     t.className = 'toast';
     t.innerHTML = `<span>${esc(message)}</span><button type="button" class="btn btn--sm btn--light">Undo</button>`;

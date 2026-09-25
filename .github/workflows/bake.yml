@@ -6,6 +6,10 @@ name: Copy admin panel changes into the files
 on:
   schedule:
     - cron: "4,19,34,49 * * * *"
+  # also right away when this copying script itself changes
+  push:
+    branches: [main]
+    paths: [".github/workflows/bake.yml", "tools/bake.mjs"]
   workflow_dispatch: {}
 permissions:
   contents: write
